@@ -124,6 +124,7 @@ testParams :: FilePath -> IO [(String, String)]
 testParams intTestBase = do
   absTestBase <- if isAbsolute intTestBase then return intTestBase
                  else (\r -> r </> intTestBase) <$> getCurrentDirectory
+  putStrLn $ "Running cabal to get saw path"
   sawExe <- readProcess "cabal" ["v2-exec", "which", "saw"] ""
   let sawRoot = takeDirectory absTestBase
       jverPath = sawRoot </> "deps" </> "jvm-verifier"  -- jss *might* be here
@@ -144,12 +145,14 @@ testParams intTestBase = do
   (e2, jars0) <- case lookup "JAVA_HOME" (envVarAssocList e1) of
                    Just jh -> return (updEnvVars "PATH" (jh </> "bin") e1,
                                       jh </> "jre" </> "lib" </> "rt.jar")
-                   Nothing -> do rt <- readProcess "find-java-rt-jar.sh" [] ""  -- from jvm-verifier
+                   Nothing -> do putStrLn $ "Running find-java-rt-jar.sh to get java jar path"
+                                 rt <- readProcess "find-java-rt-jar.sh" [] ""  -- from jvm-verifier
                                  return (e1, intercalate [searchPathSeparator] $ lines rt)
 
   -- Create a pathlist of jars for invoking saw and jss
   let sawJarPath = absTestBase </> "jars"
 
+  putStrLn $ "Running bash to get jss path"
   jssPath <- readCreateProcess ((proc "bash" ["-c", "type -p jss"])
                                 { env = Just $ envVarAssocList e2 }) ""
   let jssJarPath1 = jverPath </> "jars"
@@ -186,6 +189,8 @@ genTests envvars disabled = map mkTest
     preTest n = if takeFileName n `elem` disabled then ignoreTest else id
     mkTest n = preTest n $ testCase (takeFileName n) $ do
       let cmd = (shell "bash test.sh") { cwd = Just n, env = Just envvars }
+      here <- getCurrentDirectory
+      putStrLn $ "Running bash test in " <> n <> " to test (from " <> here <> ")"
       (r,o,e) <- liftIO $ readCreateProcessWithExitCode cmd ""
       if r == ExitSuccess
         then return ()
