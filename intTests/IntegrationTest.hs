@@ -24,15 +24,18 @@ import Control.Monad ( filterM, foldM, join, unless )
 import Control.Monad.IO.Class (liftIO)
 import Data.List ( isPrefixOf, intercalate, sort )
 import Data.Maybe ( fromMaybe )
-import System.Directory ( getCurrentDirectory, listDirectory, doesDirectoryExist )
+import System.Directory ( getCurrentDirectory
+                        , findExecutable
+                        , findExecutablesInDirectories
+                        , listDirectory, doesDirectoryExist )
 import System.Environment ( lookupEnv )
 import System.Exit ( ExitCode(ExitSuccess), exitFailure )
 import System.FilePath ( (</>), pathSeparator, searchPathSeparator
                        , takeDirectory, takeFileName, isAbsolute )
 import System.FilePath.Find ( always, find, extension, (==?) )
 import System.IO ( hPutStrLn, stderr )
-import System.Process ( readProcess, readCreateProcess, readCreateProcessWithExitCode
-                      , shell, proc, CreateProcess(..) )
+import System.Process ( readProcess, readCreateProcessWithExitCode
+                      , shell, CreateProcess(..) )
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.ExpectedFailure
@@ -152,9 +155,13 @@ testParams intTestBase = do
   -- Create a pathlist of jars for invoking saw and jss
   let sawJarPath = absTestBase </> "jars"
 
-  putStrLn $ "Running bash to get jss path"
-  jssPath <- readCreateProcess ((proc "bash" ["-c", "type -p jss"])
-                                { env = Just $ envVarAssocList e2 }) ""
+  putStrLn $ "Get jss path"
+  jssPath <- findExecutable "jss" >>= \case
+    Just p -> return p
+    Nothing -> findExecutablesInDirectories [jverPath] "jss" >>= \case
+      [] -> error $ "Unable to find jss executable in " <> jverPath <> " or PATH"
+      es -> return $ head es
+
   let jssJarPath1 = jverPath </> "jars"
       jssJarPath2 = (takeDirectory $ takeDirectory jssPath) </> "share" </> "java"
 
