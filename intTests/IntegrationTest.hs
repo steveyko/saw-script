@@ -78,23 +78,27 @@ getTestList testdir disabled = do
 -- set of values with a separator), then override/update with any
 -- environment variables set.
 
-data EnvVarSpec = EV String String | EVs String Char [String]
-
-updEnvVar :: EnvVarSpec -> String -> EnvVarSpec
-updEnvVar (EV  n _)    v = EV n v
-updEnvVar (EVs n s vs) v = EVs n s (v:vs)
+data EnvVarSpec = EV String String
+                  -- ^ single string value
+                | EVp String Char [String]
+                  -- ^ accumulative path with separator
+                | EVd String String String
+                  -- ^ default initial value, prefix for replacement,
+                  -- then accumulative words
 
 updEnvVars :: String -> String -> [EnvVarSpec] -> [EnvVarSpec]
 updEnvVars n v [] = [ EV n v ]
 updEnvVars n v (EV  n'   v' : evs) | n == n' = EV  n (if v == "" then v' else v) : evs
-updEnvVars n v (EVs n' s v' : evs) | n == n' = EVs n s (v' <> [v]) : evs
+updEnvVars n v (EVd n' p v' : evs) | n == n' = EVp n ' ' (if v == "" then [p, v'] else [p, v]) : evs
+updEnvVars n v (EVp n' s v' : evs) | n == n' = EVp n s (v' <> [v]) : evs
 updEnvVars n v (ev : evs) = ev : updEnvVars n v evs
 
 envVarAssocList :: [EnvVarSpec] -> [(String, String)]
 envVarAssocList = map envVarAssoc
   where
     envVarAssoc (EV  n v)    = (n, v)
-    envVarAssoc (EVs n s vs) = (n, intercalate [s] vs)
+    envVarAssoc (EVd n p v)  = (n, p <> " " <> v)
+    envVarAssoc (EVp n s vs) = (n, intercalate [s] vs)
 
 -- ----------------------------------------------------------------------
 -- * Test Parameters
@@ -119,6 +123,10 @@ envVarAssocList = map envVarAssoc
 --     - The rt.jar runtime library from the JAVA installation
 --     - Any jars supplied with the jvm-verifier
 --     - Any jars supplied by saw
+--
+-- Note that even if JSS and SAW are specified in the environment,
+-- this test runner will augment those definitions with the discovered
+-- jar files and target path specifications.
 
 
 -- | Returns the environment variable assocList to use for running
@@ -133,10 +141,17 @@ testParams intTestBase = do
       jverPath = sawRoot </> "deps" </> "jvm-verifier"  -- jss *might* be here
       eVars0 = [ EV  "JAVA"     "javac"
                , EV  "HOME"     absTestBase
-               , EVs "PATH"     searchPathSeparator [takeDirectory sawExe, jverPath ]
+               , EVp "PATH"     searchPathSeparator [takeDirectory sawExe, jverPath ]
                , EV  "TESTBASE" absTestBase
                , EV  "DIRSEP"   [pathSeparator]
                , EV  "CPSEP"    [searchPathSeparator]
+
+               -- The 'eval's here interpret the single quotes for the
+               -- jarfile and directory path arguments added below
+               -- protecting the spaces and semi-colons in the Windows
+               -- class path.
+               , EVd "JSS"      "eval" "jss"
+               , EVd "SAW"      "eval" "saw"
                ]
       addEnvVar evs e = do v <- lookupEnv e
                            return $ updEnvVars e (fromMaybe "" v) evs
@@ -176,10 +191,8 @@ testParams intTestBase = do
   -- corresponding tools with the JAR list, again allowing ENV
   -- override.
   --
-  -- The 'eval's here interpret the single quotes
-  -- protecting the spaces and semi-colons in the Windows class path.
-  let e3 = updEnvVars "SAW" (unwords [ "eval", "saw", "-j", "'" <> jars <> "'" ]) $
-           updEnvVars "JSS" (unwords [ "eval", "jss", "-j", "'" <> jars <> "'", "-c", "." ]) e2
+  let e3 = updEnvVars "SAW" (unwords [ "-j", "'" <> jars <> "'" ]) $
+           updEnvVars "JSS" (unwords [ "-j", "'" <> jars <> "'", "-c", "." ]) e2
 
   envVarAssocList <$> foldM addEnvVar e3 [ "SAW", "JSS" ]
 
