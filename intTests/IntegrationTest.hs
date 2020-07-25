@@ -170,7 +170,8 @@ testParams intTestBase = do
   let sawJarPath = absTestBase </> "jars"
 
   putStrLn $ "Get jss path"
-  jssPath <- findExecutable "jss" >>= \case
+  let Just (jssexe:_) = reverse . words <$> lookup "JSS" (envVarAssocList e2)
+  jssPath <- findExecutable jssexe >>= \case
     Just p -> return p
     Nothing -> findExecutablesInDirectories [jverPath] "jss" >>= \case
       [] -> error $ "Unable to find jss executable in " <> jverPath <> " or PATH "  <> (show $ lookup "PATH" (envVarAssocList e2))
