@@ -69,7 +69,7 @@ jobs:
         - ls bin
         - echo TBD/bin
         - ls $TRAVIS_BUILD_DIR/bin
-        - JSS=$TRAVIS_BUILD_DIR/bin/jss SAW=$TRAVIS_BUILD_DIR/bin/saw cabal v2-test
+        - JSS=bin/jss SAW=bin/saw cabal v2-test
         - cd intTests
         - for t in test0001 test0019_jss_switch_statement test_crucible_jvm test_ecdsa test_examples test_issue108 test_tutorial1 test_tutorial2 test_tutorial_w4; do echo $t >> disabled_tests.txt; done
         - BIN=$TRAVIS_BUILD_DIR/bin RT_JAR=/usr/lib/jvm/java-8-openjdk-amd64/jre/lib/rt.jar LOUD=true ./runtests.sh
