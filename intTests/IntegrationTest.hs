@@ -137,6 +137,7 @@ testParams intTestBase = do
                  else (\r -> r </> intTestBase) <$> getCurrentDirectory
   putStrLn $ "Running cabal to get saw path"
   sawExe <- readProcess "cabal" ["v2-exec", "which", "saw"] ""
+  putStrLn $ "  found saw exe at: " <> sawExe
   let sawRoot = takeDirectory absTestBase
       jverPath = sawRoot </> "deps" </> "jvm-verifier"  -- jss *might* be here
       eVars0 = [ EV  "JAVA"     "javac"
@@ -169,8 +170,9 @@ testParams intTestBase = do
   -- Create a pathlist of jars for invoking saw and jss
   let sawJarPath = absTestBase </> "jars"
 
-  putStrLn $ "Get jss path"
   let Just (jssexe:_) = reverse . words <$> lookup "JSS" (envVarAssocList e2)
+  here <- getCurrentDirectory
+  putStrLn $ "Get jss path for " <> jssexe <> " from " <> here
   jssPath <- findExecutable jssexe >>= \case
     Just p -> return p
     Nothing -> findExecutablesInDirectories [jverPath] "jss" >>= \case
@@ -258,6 +260,7 @@ main = do
                               filter (flip elem path_ets) testdirs')) <$>
               lookupEnv "ENABLED_TESTS"
   envVars <- testParams base
+  putStrLn $ "ENV: " <> show envVars
   defaultMain $
     localOption (mkTimeout $ 5 * 60 * 1000 * 1000) $  -- 5 minute timeout in usecs
     testGroup "intTests" $
