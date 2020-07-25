@@ -146,8 +146,11 @@ testParams intTestBase = do
                , EV  "DIRSEP"   [pathSeparator]
                , EV  "CPSEP"    [searchPathSeparator]
 
-               , EVd "JSS"      "" "jss"
-               , EVd "SAW"      "" "saw"
+               -- The eval is used to protect the evaluation of the
+               -- single-quoted arguments supplied below when run in a
+               -- bash test.sh script.
+               , EVd "JSS"      "eval" "jss"
+               , EVd "SAW"      "eval" "saw"
                ]
       addEnvVar evs e = do v <- lookupEnv e
                            return $ updEnvVars e (fromMaybe "" v) evs
