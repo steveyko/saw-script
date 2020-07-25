@@ -146,12 +146,8 @@ testParams intTestBase = do
                , EV  "DIRSEP"   [pathSeparator]
                , EV  "CPSEP"    [searchPathSeparator]
 
-               -- The 'eval's here interpret the single quotes for the
-               -- jarfile and directory path arguments added below
-               -- protecting the spaces and semi-colons in the Windows
-               -- class path.
-               , EVd "JSS"      "eval" "jss"
-               , EVd "SAW"      "eval" "saw"
+               , EVd "JSS"      "" "jss"
+               , EVd "SAW"      "" "saw"
                ]
       addEnvVar evs e = do v <- lookupEnv e
                            return $ updEnvVars e (fromMaybe "" v) evs
