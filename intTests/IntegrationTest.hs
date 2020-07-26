@@ -172,7 +172,8 @@ testParams intTestBase = do
 
   let Just (jssexe:_) = reverse . words <$> lookup "JSS" (envVarAssocList e2)
   here <- getCurrentDirectory
-  putStrLn $ "Get jss path for " <> jssexe <> " from " <> here
+  has <- doesFileExist jssexe
+  putStrLn $ "Get jss path for " <> jssexe <> "(" <> show has <> ") from " <> here
   jssPath <- findExecutable jssexe >>= \case
     Just p -> return p
     Nothing -> findExecutablesInDirectories [jverPath] "jss" >>= \case
