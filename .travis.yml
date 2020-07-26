@@ -63,10 +63,10 @@ jobs:
         - cp z3-4.8.7-x64-ubuntu-16.04/bin/z3 bin
       script:
         - echo TRAVIS_BUILD_DIR $TRAVIS_BUILD_DIR
-        - echo HERE
         - pwd
         - echo bin
-        - ls bin
+        - ls -lh bin
+        - file bin/jss
         - echo TBD/bin
         - ls $TRAVIS_BUILD_DIR/bin
         - JSS=bin/jss SAW=bin/saw cabal v2-test
