@@ -24,7 +24,7 @@ import Control.Monad ( filterM, foldM, join, unless )
 import Control.Monad.IO.Class (liftIO)
 import Data.List ( isPrefixOf, intercalate, sort )
 import Data.Maybe ( fromMaybe )
-import System.Directory ( getCurrentDirectory
+import System.Directory ( getCurrentDirectory, getPermissions, executable
                         , findExecutable
                         , findExecutablesInDirectories
                         , listDirectory, doesDirectoryExist, doesFileExist )
@@ -170,15 +170,23 @@ testParams intTestBase = do
   -- Create a pathlist of jars for invoking saw and jss
   let sawJarPath = absTestBase </> "jars"
 
+  -- Find the jss executable because it's likely the jar files live
+  -- next to the executable.  Note that 'findExecutable' is odd in
+  -- that it doesn't support relative filepaths like "bin/jss", thus
+  -- the direct check first.
   let Just (jssexe:_) = reverse . words <$> lookup "JSS" (envVarAssocList e2)
   here <- getCurrentDirectory
   has <- doesFileExist jssexe
   putStrLn $ "Get jss path for " <> jssexe <> "(" <> show has <> ") from " <> here
-  jssPath <- findExecutable jssexe >>= \case
-    Just p -> return p
-    Nothing -> findExecutablesInDirectories [jverPath] "jss" >>= \case
-      [] -> error $ "Unable to find jss executable in " <> jverPath <> " or PATH "  <> (show $ lookup "PATH" (envVarAssocList e2))
-      es -> return $ head es
+  jssPath <- doesFileExist jssexe >>= \case
+    True -> executable <$> getPermissions jssexe >>= \case
+      True -> return jssexe
+      False -> error $ "JSS executable specified as \"" <> jssexe <> "\" exists but is not executable"
+    False -> findExecutable jssexe >>= \case
+      Just p -> return p
+      Nothing -> findExecutablesInDirectories [jverPath] "jss" >>= \case
+        [] -> error $ "Unable to find jss executable in " <> jverPath <> " or PATH "  <> (show $ lookup "PATH" (envVarAssocList e2))
+        es -> return $ head es
 
   let jssJarPath1 = jverPath </> "jars"
       jssJarPath2 = (takeDirectory $ takeDirectory jssPath) </> "share" </> "java"
