@@ -27,7 +27,7 @@ import Data.Maybe ( fromMaybe )
 import System.Directory ( getCurrentDirectory
                         , findExecutable
                         , findExecutablesInDirectories
-                        , listDirectory, doesDirectoryExist )
+                        , listDirectory, doesDirectoryExist, doesFileExist )
 import System.Environment ( lookupEnv )
 import System.Exit ( ExitCode(ExitSuccess), exitFailure )
 import System.FilePath ( (</>), pathSeparator, searchPathSeparator
