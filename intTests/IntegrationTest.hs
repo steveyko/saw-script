@@ -131,13 +131,16 @@ envVarAssocList = map envVarAssoc
 
 -- | Returns the environment variable assocList to use for running
 -- each individual test
-testParams :: FilePath -> IO [(String, String)]
-testParams intTestBase = do
-  absTestBase <- if isAbsolute intTestBase then return intTestBase
-                 else (\r -> r </> intTestBase) <$> getCurrentDirectory
-  putStrLn $ "Running cabal to get saw path"
-  sawExe <- readProcess "cabal" ["v2-exec", "which", "saw"] ""
-  putStrLn $ "  found saw exe at: " <> sawExe
+testParams :: FilePath -> (String -> IO ()) -> IO [(String, String)]
+testParams intTestBase verbose = do
+  here <- getCurrentDirectory
+  let absTestBase = if isAbsolute intTestBase then intTestBase
+                    else here </> intTestBase
+
+  sawExe <- let v1loc = here </> "dist" </> "build" </> "saw" </> "saw"
+            in doesFileExist v1loc >>= \case
+                 True -> return v1loc
+                 False -> readProcess "cabal" ["v2-exec", "which", "saw"] ""
   let sawRoot = takeDirectory absTestBase
       jverPath = sawRoot </> "deps" </> "jvm-verifier"  -- jss *might* be here
       eVars0 = [ EV  "JAVA"     "javac"
