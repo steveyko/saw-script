@@ -141,6 +141,7 @@ testParams intTestBase verbose = do
             in doesFileExist v1loc >>= \case
                  True -> return v1loc
                  False -> readProcess "cabal" ["v2-exec", "which", "saw"] ""
+  verbose $ "Locally-built saw exe at: " <> sawExe
   let sawRoot = takeDirectory absTestBase
       jverPath = sawRoot </> "deps" </> "jvm-verifier"  -- jss *might* be here
       eVars0 = [ EV  "JAVA"     "javac"
@@ -166,7 +167,7 @@ testParams intTestBase verbose = do
   (e2, jars0) <- case lookup "JAVA_HOME" (envVarAssocList e1) of
                    Just jh -> return (updEnvVars "PATH" (jh </> "bin") e1,
                                       jh </> "jre" </> "lib" </> "rt.jar")
-                   Nothing -> do putStrLn $ "Running find-java-rt-jar.sh to get java jar path"
+                   Nothing -> do verbose $ "Running find-java-rt-jar.sh to get java jar path"
                                  rt <- readProcess "find-java-rt-jar.sh" [] ""  -- from jvm-verifier
                                  return (e1, intercalate [searchPathSeparator] $ lines rt)
 
@@ -178,9 +179,7 @@ testParams intTestBase verbose = do
   -- that it doesn't support relative filepaths like "bin/jss", thus
   -- the direct check first.
   let Just (jssexe:_) = reverse . words <$> lookup "JSS" (envVarAssocList e2)
-  here <- getCurrentDirectory
-  has <- doesFileExist jssexe
-  putStrLn $ "Get jss path for " <> jssexe <> "(" <> show has <> ") from " <> here
+  verbose $ "Finding JSS executable " <> jssexe <> " directly or in PATH"
   jssPath <- doesFileExist jssexe >>= \case
     True -> executable <$> getPermissions jssexe >>= \case
       True -> return jssexe
@@ -193,13 +192,15 @@ testParams intTestBase verbose = do
 
   let jssJarPath1 = jverPath </> "jars"
       jssJarPath2 = (takeDirectory $ takeDirectory jssPath) </> "share" </> "java"
+      jarpaths = [ jssJarPath1, jssJarPath2, sawJarPath ]
 
       findJarsIn p = doesDirectoryExist p >>= \case
         True -> find always (extension ==? ".jar") p
         False -> return []
 
+  verbose $ "Finding JARs in " <> show jarpaths
   jars <- intercalate [searchPathSeparator] . (jars0 :) . join <$>
-          mapM findJarsIn [ jssJarPath1, jssJarPath2, sawJarPath ]
+          mapM findJarsIn jarpaths
 
   -- Set the SAW and JSS env var for the testing scripts to invoke the
   -- corresponding tools with the JAR list, again allowing ENV
@@ -208,7 +209,7 @@ testParams intTestBase verbose = do
   let e3 = updEnvVars "SAW" (unwords [ "-j", "'" <> jars <> "'" ]) $
            updEnvVars "JSS" (unwords [ "-j", "'" <> jars <> "'", "-c", "." ]) e2
 
-  envVarAssocList <$> foldM addEnvVar e3 [ "SAW", "JSS" ]
+  return $ envVarAssocList e3
 
 
 -- ----------------------------------------------------------------------
@@ -223,12 +224,10 @@ genTests envvars disabled = map mkTest
     preTest n = if takeFileName n `elem` disabled then ignoreTest else id
     mkTest n = preTest n $ testCase (takeFileName n) $ do
       let cmd = (shell "bash test.sh") { cwd = Just n, env = Just envvars }
-      here <- getCurrentDirectory
-      putStrLn $ "Running bash test in " <> n <> " to test (from " <> here <> ")"
       (r,o,e) <- liftIO $ readCreateProcessWithExitCode cmd ""
       if r == ExitSuccess
         then return ()
-        else putStrLn o >> putStrLn e
+        else putStrLn o >> hPutStrLn stderr e
       r @=? ExitSuccess
 
 
@@ -250,8 +249,8 @@ check_cryptol_specs testPath disabled tests = testCase "cryptol-specs Available"
   in if need_cryptol_spec
      then do have_cs <- liftIO $ doesDirectoryExist $ cspec_dir </> "Primitive"
              unless (have_cs) $ liftIO $ do
-               putStrLn "Tests require cryptol-specs as a checked-out subrepo:"
-               putStrLn "  $ git submodule update --init deps/cryptol-specs"
+               hPutStrLn stderr "Tests require cryptol-specs as a checked-out subrepo:"
+               hPutStrLn stderr "  $ git submodule update --init deps/cryptol-specs"
              assertBool "Missing cryptol-specs" have_cs
      else return ()
 
@@ -259,20 +258,24 @@ check_cryptol_specs testPath disabled tests = testCase "cryptol-specs Available"
 main :: IO ()
 main = do
   let base = "intTests"
+  -- Run tests with VERBOSE=y environment variable for extra output.
+  verbose <- lookupEnv "VERBOSE" >>= \case
+    Just "y" -> return $ putStrLn
+    _ -> return $ const (return ())
   found <- doesDirectoryExist base
   unless found $ do
     curwd <- getCurrentDirectory
     hPutStrLn stderr $ "FAILURE: cannot find test directory " <> base <> " from " <> curwd
     exitFailure
   dset <- getDisabledTestList base
-  -- putStrLn $ "Disabled tests: " <> show dset
+  verbose $ "Disabled tests: " <> show dset
   testdirs' <- getTestList base [] -- no filtering here; they will be ignoreTest'd by genTests
   testdirs <- fromMaybe testdirs' .
               (fmap (\et -> let path_ets = fmap (base </>) $ words et in
                               filter (flip elem path_ets) testdirs')) <$>
               lookupEnv "ENABLED_TESTS"
-  envVars <- testParams base
-  putStrLn $ "ENV: " <> show envVars
+  envVars <- testParams base verbose
+  verbose $ "ENV: " <> show envVars
   defaultMain $
     localOption (mkTimeout $ 5 * 60 * 1000 * 1000) $  -- 5 minute timeout in usecs
     testGroup "intTests" $
