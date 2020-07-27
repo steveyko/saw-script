@@ -69,6 +69,9 @@ jobs:
         - file bin/jss
         - echo TBD/bin
         - ls $TRAVIS_BUILD_DIR/bin
+        - which javac
+        - java -verbose | grep Opened
+        - ls -lhR /usr/lib/jvm
         - ls -lhR $JAVA_HOME
         - VERBOSE=y JSS=$TRAVIS_BUILD_DIR/bin/jss SAW=$TRAVIS_BUILD_DIR/bin/saw cabal v2-test
         - cd intTests
