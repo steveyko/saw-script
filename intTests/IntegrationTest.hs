@@ -218,7 +218,9 @@ testParams intTestBase verbose = do
   -- override.
   --
   let e3 = updEnvVars "SAW" (unwords [ "-j", "'" <> jars <> "'" ]) $
-           updEnvVars "JSS" (unwords [ "-j", "'" <> jars <> "'", "-c", "." ]) e2
+           updEnvVars "JSS" (unwords [ "-j", "'" <> jars <> "'", "-c", "." ]) $
+           updEnvVars "PATH" (takeDirectory jssPath) $
+           e2
 
   return $ envVarAssocList e3
 
