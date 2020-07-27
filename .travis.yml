@@ -73,7 +73,7 @@ jobs:
         - java -verbose | grep Opened
         - ls -lhR /usr/lib/jvm
         - ls -lhR $JAVA_HOME
-        - VERBOSE=y JSS=$TRAVIS_BUILD_DIR/bin/jss SAW=$TRAVIS_BUILD_DIR/bin/saw cabal v2-test
+        - VERBOSE=y JSS=$TRAVIS_BUILD_DIR/bin/jss SAW=$TRAVIS_BUILD_DIR/bin/saw RT_JAR=/usr/lib/jvm/java-8-openjdk-amd64/jre/lib/rt.jar JAVAC=/usr/lib/jvm/java-8-openjdk-amd64/bin/javac cabal v2-test
         - cd intTests
         - for t in test0001 test0019_jss_switch_statement test_crucible_jvm test_ecdsa test_examples test_issue108 test_tutorial1 test_tutorial2 test_tutorial_w4; do echo $t >> disabled_tests.txt; done
         - BIN=$TRAVIS_BUILD_DIR/bin RT_JAR=/usr/lib/jvm/java-8-openjdk-amd64/jre/lib/rt.jar LOUD=true ./runtests.sh
