@@ -22,7 +22,7 @@ module Main where
 
 import Control.Monad ( filterM, foldM, join, unless )
 import Control.Monad.IO.Class (liftIO)
-import Data.List ( isPrefixOf, intercalate, sort )
+import Data.List ( isInfixOf, isPrefixOf, intercalate, sort )
 import Data.Maybe ( fromMaybe )
 import System.Directory ( getCurrentDirectory, getPermissions, executable
                         , findExecutable
@@ -155,7 +155,8 @@ testParams intTestBase verbose = do
   verbose $ "Locally-built saw exe at: " <> sawExe
   let sawRoot = takeDirectory absTestBase
       jverPath = sawRoot </> "deps" </> "jvm-verifier"  -- jss *might* be here
-      eVars0 = [ EV  "JAVA"     "javac"
+      eVars0 = [ EV  "JAVAC"    "javac"
+               , EV  "RT_JAR"   ""
                , EV  "HOME"     absTestBase
                , EVp "PATH"     searchPathSeparator [takeDirectory sawExe, jverPath ]
                , EV  "TESTBASE" absTestBase
@@ -171,16 +172,33 @@ testParams intTestBase verbose = do
       addEnvVar evs e = do v <- lookupEnv e
                            return $ updEnvVars e (fromMaybe "" v) evs
   -- override eVars0 with any environment variables set in this process
-  e1 <- foldM addEnvVar eVars0 [ "SAW", "JSS", "PATH", "JAVA", "JAVA_HOME" ]
-  -- if JAVA_HOME was set, it's bin subdir should be added to PATH and
+  e1 <- foldM addEnvVar eVars0 [ "SAW", "JSS", "PATH", "JAVAC", "JAVA_HOME", "RT_JAR" ]
+
+  -- The java compiler to run defaults to "javac" but can be
+  -- overridden by the JAVAC environment variable.  Assume that javac
+  -- is in the current path or that the JAVAC provides the path.
+
+  -- The RT_JAR environment variable can be used to provide the path
+  -- to the rt.jar file.  If it is not provided, check in JAVA_HOME or
+  -- use the jvm-verifier's utility to try to locate it.
+
+  -- if JAVA_HOME was set, its bin subdir should be added to PATH and
   -- it can be assumed to reference rt.jar.  Otherwise, use the
   -- jvm-verifier's "find-java-rt-jar.sh" script to find the latter.
-  (e2, jars0) <- case lookup "JAVA_HOME" (envVarAssocList e1) of
-                   Just jh -> return (updEnvVars "PATH" (jh </> "bin") e1,
-                                      jh </> "jre" </> "lib" </> "rt.jar")
-                   Nothing -> do verbose $ "Running find-java-rt-jar.sh to get java jar path"
-                                 rt <- readProcess "find-java-rt-jar.sh" [] ""  -- from jvm-verifier
-                                 return (e1, intercalate [searchPathSeparator] $ lines rt)
+  jars0 <- let j1 = fromMaybe "" $ lookup "RT_JAR" (envVarAssocList e1)
+               j2 = maybe "" (\jh -> jh </> "jre" </> "lib" </> "rt.jar") $ lookup "JAVA_HOME" (envVarAssocList e1)
+               j3 = do verbose $ "Running find-java-rt-jar.sh to get java jar path"
+                       rt <- readProcess "find-java-rt-jar.sh" [] ""  -- from jvm-verifier
+                       return $ case filter (`isInfixOf` "rt.jar") $ lines rt of
+                         [] -> "rt.jar"  -- unlikely to work, but could not be found elsewhere
+                         (j:_) -> j
+               doesJarExist p getJ = case p of
+                 Just _ -> return p
+                 Nothing -> do j <- getJ
+                               doesFileExist j >>= \case
+                                 True -> return $ Just j
+                                 False -> return Nothing
+           in fromMaybe "rt.jar" <$> foldM doesJarExist Nothing [ return j1, return j2, j3 ]
 
   -- Create a pathlist of jars for invoking saw and jss
   let sawJarPath = absTestBase </> "jars"
@@ -189,7 +207,7 @@ testParams intTestBase verbose = do
   -- next to the executable.  Note that 'findExecutable' is odd in
   -- that it doesn't support relative filepaths like "bin/jss", thus
   -- the direct check first.
-  let Just (jssexe:_) = reverse . words <$> lookup "JSS" (envVarAssocList e2)
+  let Just (jssexe:_) = reverse . words <$> lookup "JSS" (envVarAssocList e1)
   verbose $ "Finding JSS executable " <> jssexe <> " directly or in PATH"
   jssPath <- doesFileExist jssexe >>= \case
     True -> executable <$> getPermissions jssexe >>= \case
@@ -198,7 +216,7 @@ testParams intTestBase verbose = do
     False -> findExecutable jssexe >>= \case
       Just p -> return p
       Nothing -> findExecutablesInDirectories [jverPath] "jss" >>= \case
-        [] -> error $ "Unable to find jss executable in " <> jverPath <> " or PATH "  <> (show $ lookup "PATH" (envVarAssocList e2))
+        [] -> error $ "Unable to find jss executable in " <> jverPath <> " or PATH "  <> (show $ lookup "PATH" (envVarAssocList e1))
         es -> return $ head es
 
   let jssJarPath1 = jverPath </> "jars"
@@ -220,7 +238,7 @@ testParams intTestBase verbose = do
   let e3 = updEnvVars "SAW" (unwords [ "-j", "'" <> jars <> "'" ]) $
            updEnvVars "JSS" (unwords [ "-j", "'" <> jars <> "'", "-c", "." ]) $
            updEnvVars "PATH" (takeDirectory jssPath) $
-           e2
+           e1
 
   return $ envVarAssocList e3
 
