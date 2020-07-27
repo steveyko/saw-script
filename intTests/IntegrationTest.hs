@@ -34,7 +34,9 @@ import System.FilePath ( (</>), pathSeparator, searchPathSeparator
                        , takeDirectory, takeFileName, isAbsolute )
 import System.FilePath.Find ( always, find, extension, (==?) )
 import System.IO ( hPutStrLn, stderr )
-import System.Process ( readProcess, readCreateProcessWithExitCode
+import System.Process ( readProcess
+                      , readProcessWithExitCode
+                      , readCreateProcessWithExitCode
                       , shell, CreateProcess(..) )
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -137,10 +139,19 @@ testParams intTestBase verbose = do
   let absTestBase = if isAbsolute intTestBase then intTestBase
                     else here </> intTestBase
 
+  -- try to determine where the saw binary is in case there are other
+  -- executables there (e.g. jss, z3, etc.)
   sawExe <- let v1loc = here </> "dist" </> "build" </> "saw" </> "saw"
             in doesFileExist v1loc >>= \case
                  True -> return v1loc
-                 False -> readProcess "cabal" ["v2-exec", "which", "saw"] ""
+                 False -> readProcessWithExitCode "cabal" ["v2-exec", "which", "saw"] "" >>= \case
+                   (ExitSuccess, o, _) -> return o
+                   _ -> lookupEnv "SAW" >>= \case
+                     Just s -> if isAbsolute s then return s else return (here </> s)
+                     Nothing -> findExecutable "saw" >>= \case
+                       Just e -> return e
+                       _ -> return "" -- may be supplied via env var
+
   verbose $ "Locally-built saw exe at: " <> sawExe
   let sawRoot = takeDirectory absTestBase
       jverPath = sawRoot </> "deps" </> "jvm-verifier"  -- jss *might* be here
