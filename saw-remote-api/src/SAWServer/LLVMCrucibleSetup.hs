@@ -7,9 +7,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE TupleSections #-}
 module SAWServer.LLVMCrucibleSetup
-  ( startLLVMCrucibleSetup
-  , llvmLoadModule
+  ( llvmLoadModule
   , llvmLoadModuleDescr
   , Contract(..)
   , ContractVar(..)
@@ -20,18 +20,14 @@ module SAWServer.LLVMCrucibleSetup
 
 import Control.Lens
 import Control.Monad.IO.Class
-import Control.Monad.State
 import Data.Aeson (FromJSON(..), withObject, (.:))
 import Data.ByteString (ByteString)
-import Data.Foldable
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe
 import qualified Data.Text as T
 
 import qualified Cryptol.Parser.AST as P
 import Cryptol.Utils.Ident (mkIdent)
-import qualified Text.LLVM.AST as LLVM
 import qualified Data.LLVM.BitCode as LLVM
 import qualified SAWScript.Crucible.Common.MethodSpec as MS (SetupValue(..))
 import SAWScript.Crucible.LLVM.Builtins
@@ -41,11 +37,13 @@ import SAWScript.Crucible.LLVM.Builtins
     , llvm_alloc_readonly_aligned
     , llvm_execute_func
     , llvm_fresh_var
+    , llvm_ghost_value
     , llvm_points_to
     , llvm_return
     , llvm_precond
     , llvm_postcond )
 import qualified SAWScript.Crucible.LLVM.MethodSpecIR as CMS
+import qualified SAWScript.Crucible.Common.MethodSpec as CMS (GhostGlobal)
 import SAWScript.Value (BuiltinContext, LLVMCrucibleSetupM(..), biSharedContext)
 import qualified Verifier.SAW.CryptolEnv as CEnv
 import Verifier.SAW.CryptolEnv (CryptolEnv)
@@ -62,11 +60,6 @@ import SAWServer.Exceptions
 import SAWServer.OK
 import SAWServer.TrackFile
 
-startLLVMCrucibleSetup :: StartLLVMCrucibleSetupParams -> Method SAWState OK
-startLLVMCrucibleSetup (StartLLVMCrucibleSetupParams n) =
-  do pushTask (LLVMCrucibleSetup n [])
-     ok
-
 data StartLLVMCrucibleSetupParams
   = StartLLVMCrucibleSetupParams ServerName
 
@@ -77,67 +70,77 @@ instance FromJSON StartLLVMCrucibleSetupParams where
 
 data ServerSetupVal = Val (CMS.AllLLVM MS.SetupValue)
 
--- TODO: this is an extra layer of indirection that could be collapsed, but is easy to implement for now.
 compileLLVMContract ::
   (FilePath -> IO ByteString) ->
   BuiltinContext ->
+  (Map ServerName CMS.GhostGlobal) ->
   CryptolEnv ->
   Contract JSONLLVMType (P.Expr P.PName) ->
   LLVMCrucibleSetupM ()
-compileLLVMContract fileReader bic cenv c =
-  interpretLLVMSetup fileReader bic cenv steps
+compileLLVMContract fileReader bic ghostEnv cenv0 c =
+  do allocsPre <- mapM setupAlloc (preAllocated c)
+     (envPre, cenvPre) <- setupState allocsPre cenv0 (preVars c)
+     mapM_ (\p -> getTypedTerm cenvPre p >>= llvm_precond) (preConds c)
+     mapM_ (setupPointsTo (envPre, cenvPre)) (prePointsTos c)
+     mapM_ (setupGhostPointsTo ghostEnv cenvPre) (preGhostPointsTos c)
+     traverse (getSetupVal (envPre, cenvPre)) (argumentVals c) >>= llvm_execute_func
+     allocsPost <- mapM setupAlloc (postAllocated c)
+     (envPost, cenvPost) <- setupState allocsPost cenvPre (postVars c)
+     mapM_ (\p -> getTypedTerm cenvPost p >>= llvm_postcond) (postConds c)
+     mapM_ (setupPointsTo (envPost, cenvPost)) (postPointsTos c)
+     mapM_ (setupGhostPointsTo ghostEnv cenvPost) (postGhostPointsTos c)
+     case returnVal c of
+       Just v -> getSetupVal (envPost, cenvPost) v >>= llvm_return
+       Nothing -> return ()
   where
-    setupFresh (ContractVar n dn ty) = SetupFresh n dn (llvmType ty)
-    setupAlloc (Allocated n ty mut align) = SetupAlloc n (llvmType ty) mut align
-    steps =
-      map setupFresh (preVars c) ++
-      map SetupPrecond (preConds c) ++
-      map setupAlloc (preAllocated c) ++
-      map (\(PointsTo p v) -> SetupPointsTo p v) (prePointsTos c) ++
-      [ SetupExecuteFunction (argumentVals c) ] ++
-      map setupFresh (postVars c) ++
-      map SetupPostcond (postConds c) ++
-      map setupAlloc (postAllocated c) ++
-      map (\(PointsTo p v) -> SetupPointsTo p v) (postPointsTos c) ++
-      [ SetupReturn v | v <- maybeToList (returnVal c) ]
+    setupFresh (ContractVar n dn ty) =
+      do t <- llvm_fresh_var (T.unpack dn) (llvmType ty)
+         return (n, t)
 
-interpretLLVMSetup ::
-  (FilePath -> IO ByteString) ->
-  BuiltinContext ->
-  CryptolEnv ->
-  [SetupStep LLVM.Type] ->
-  LLVMCrucibleSetupM ()
-interpretLLVMSetup fileReader bic cenv0 ss =
-  runStateT (traverse_ go ss) (mempty, cenv0) *> pure ()
-  where
-    go (SetupReturn v) = get >>= \env -> lift $ getSetupVal env v >>= llvm_return
-    -- TODO: do we really want two names here?
-    go (SetupFresh name@(ServerName n) debugName ty) =
-      do t <- lift $ llvm_fresh_var (T.unpack debugName) ty
-         (env, cenv) <- get
-         put (env, CEnv.bindTypedTerm (mkIdent n, t) cenv)
-         save name (Val (CMS.anySetupTerm t))
-    go (SetupAlloc name ty True Nothing) =
-      lift (llvm_alloc ty) >>= save name . Val
-    go (SetupAlloc name ty False Nothing) =
-      lift (llvm_alloc_readonly ty) >>= save name . Val
-    go (SetupAlloc name ty True (Just align)) =
-      lift (llvm_alloc_aligned align ty) >>= save name . Val
-    go (SetupAlloc name ty False (Just align)) =
-      lift (llvm_alloc_readonly_aligned align ty) >>= save name . Val
-    go (SetupPointsTo src tgt) = get >>= \env -> lift $
-      do ptr <- getSetupVal env src
-         tgt' <- getSetupVal env tgt
-         llvm_points_to True ptr tgt'
-    go (SetupExecuteFunction args) =
-      get >>= \env ->
-      lift $ traverse (getSetupVal env) args >>= llvm_execute_func
-    go (SetupPrecond p) = get >>= \env -> lift $
-      getTypedTerm env p >>= llvm_precond
-    go (SetupPostcond p) = get >>= \env -> lift $
-      getTypedTerm env p >>= llvm_postcond
+    setupState allocs cenv vars =
+      do freshTerms <- mapM setupFresh vars
+         let cenv' = foldr (\(ServerName n, t) -> CEnv.bindTypedTerm (mkIdent n, t)) cenv freshTerms
+         let env = Map.fromList $
+                   [ (n, Val (CMS.anySetupTerm t)) | (n, t) <- freshTerms ] ++
+                   [ (n, Val v) | (n, v) <- allocs ]
+         return (env, cenv')
 
-    save name val = modify' (\(env, cenv) -> (Map.insert name val env, cenv))
+    setupAlloc (Allocated n ty mut malign) =
+      case (mut, malign) of
+        (True,  Nothing)      -> (n,) <$> llvm_alloc ty'
+        (False, Nothing)      -> (n,) <$> llvm_alloc_readonly ty'
+        (True,  (Just align)) -> (n,) <$> llvm_alloc_aligned align ty'
+        (False, (Just align)) -> (n,) <$> llvm_alloc_readonly_aligned align ty'
+      where
+        ty' = llvmType ty
+
+    setupPointsTo env (PointsTo p v) =
+      do ptr <- getSetupVal env p
+         val <- getSetupVal env v
+         llvm_points_to True ptr val
+
+    setupGhostPointsTo genv cenv (GhostPointsTo n e) =
+      do g <- resolve genv n
+         t <- getTypedTerm cenv e
+         llvm_ghost_value g t
+
+    resolve :: Map ServerName a -> ServerName -> LLVMCrucibleSetupM a
+    resolve env name =
+      LLVMCrucibleSetupM $
+      case Map.lookup name env of
+        Just v -> return v
+        Nothing -> fail "Server value not found - impossible!" -- rule out elsewhere
+
+    getTypedTerm ::
+      CryptolEnv ->
+      P.Expr P.PName ->
+      LLVMCrucibleSetupM TypedTerm
+    getTypedTerm cenv expr = LLVMCrucibleSetupM $
+      do res <- liftIO $ getTypedTermOfCExp fileReader (biSharedContext bic) cenv expr
+         -- TODO: add warnings (snd res)
+         case fst res of
+           Right (t, _) -> return t
+           Left err -> fail $ "Cryptol error: " ++ show err
 
     getSetupVal ::
       (Map ServerName ServerSetupVal, CryptolEnv) ->
@@ -160,34 +163,10 @@ interpretLLVMSetup fileReader bic cenv0 ss =
       LLVMCrucibleSetupM $ return $ CMS.anySetupGlobalInitializer name
     getSetupVal _ (GlobalLValue name) =
       LLVMCrucibleSetupM $ return $ CMS.anySetupGlobal name
-    getSetupVal (env, _) (NamedValue n) = LLVMCrucibleSetupM $
-      resolve env n >>=
-      \case
-        Val x -> return x -- TODO add cases for the named server values that
-                          -- are not coming from the setup monad
-                          -- (e.g. surrounding context)
-    getSetupVal (_, cenv) (CryptolExpr expr) = LLVMCrucibleSetupM $
-      do res <- liftIO $ getTypedTermOfCExp fileReader (biSharedContext bic) cenv expr
-         -- TODO: add warnings (snd res)
-         case fst res of
-           Right (t, _) -> return (CMS.anySetupTerm t)
-           Left err -> error $ "Cryptol error: " ++ show err -- TODO: report properly
-
-    getTypedTerm ::
-      (Map ServerName ServerSetupVal, CryptolEnv) ->
-      P.Expr P.PName ->
-      LLVMCrucibleSetupM TypedTerm
-    getTypedTerm (_, cenv) expr = LLVMCrucibleSetupM $
-      do res <- liftIO $ getTypedTermOfCExp fileReader (biSharedContext bic) cenv expr
-         -- TODO: add warnings (snd res)
-         case fst res of
-           Right (t, _) -> return t
-           Left err -> error $ "Cryptol error: " ++ show err -- TODO: report properly
-
-    resolve env name =
-       case Map.lookup name env of
-         Just v -> return v
-         Nothing -> error "Server value not found - impossible!" -- rule out elsewhere
+    getSetupVal (env, _) (NamedValue n) =
+      resolve env n >>= \case Val x -> return x
+    getSetupVal (_, cenv) (CryptolExpr expr) =
+      CMS.anySetupTerm <$> getTypedTerm cenv expr
 
 data LLVMLoadModuleParams
   = LLVMLoadModuleParams ServerName FilePath

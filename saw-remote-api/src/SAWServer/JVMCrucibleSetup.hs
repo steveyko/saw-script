@@ -8,8 +8,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 module SAWServer.JVMCrucibleSetup
-  ( startJVMSetup
-  , jvmLoadClass
+  ( jvmLoadClass
   , compileJVMContract
   ) where
 
@@ -45,11 +44,6 @@ import SAWServer.CryptolExpression (getTypedTermOfCExp)
 import SAWServer.Exceptions
 import SAWServer.OK
 import SAWServer.TopLevel
-
-startJVMSetup :: StartJVMSetupParams -> Method SAWState OK
-startJVMSetup (StartJVMSetupParams n) =
-  do pushTask (JVMSetup n [])
-     ok
 
 data StartJVMSetupParams
   = StartJVMSetupParams ServerName

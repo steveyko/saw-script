@@ -11,6 +11,7 @@ module SAWServer.LLVMVerify
 
 import Prelude hiding (mod)
 import Control.Lens
+import qualified Data.Map as Map
 
 import SAWScript.Crucible.LLVM.Builtins
 import SAWScript.Crucible.LLVM.X86
@@ -35,13 +36,15 @@ llvmVerifyAssume mode (VerifyParams modName fun lemmaNames checkSat contract scr
      case tasks of
        (_:_) -> raise $ notAtTopLevel $ map fst tasks
        [] ->
-         do pushTask (LLVMCrucibleSetup lemmaName [])
+         do pushTask (LLVMCrucibleSetup lemmaName)
             state <- getState
             mod <- getLLVMModule modName
             let bic = view sawBIC state
                 cenv = rwCryptol (view sawTopLevelRW state)
             fileReader <- getFileReader
-            setup <- compileLLVMContract fileReader bic cenv <$> traverse getCryptolExpr contract
+            ghostEnv <- Map.fromList <$> getGhosts
+            setup <- compileLLVMContract fileReader bic ghostEnv cenv <$>
+                     traverse getCryptolExpr contract
             res <- case mode of
               VerifyContract -> do
                 lemmas <- mapM getLLVMMethodSpecIR lemmaNames
@@ -89,7 +92,7 @@ llvmVerifyX86 (X86VerifyParams modName objName fun globals _lemmaNames checkSat 
      case tasks of
        (_:_) -> raise $ notAtTopLevel $ map fst tasks
        [] ->
-         do pushTask (LLVMCrucibleSetup lemmaName [])
+         do pushTask (LLVMCrucibleSetup lemmaName)
             state <- getState
             mod <- getLLVMModule modName
             let bic = view  sawBIC state
@@ -97,7 +100,9 @@ llvmVerifyX86 (X86VerifyParams modName objName fun globals _lemmaNames checkSat 
                 allocs = map (\(X86Alloc name size) -> (name, size)) globals
             proofScript <- interpretProofScript script
             fileReader <- getFileReader
-            setup <- compileLLVMContract fileReader bic cenv <$> traverse getCryptolExpr contract
+            ghostEnv <- Map.fromList <$> getGhosts
+            setup <- compileLLVMContract fileReader bic ghostEnv cenv <$>
+                     traverse getCryptolExpr contract
             res <- tl $ llvm_verify_x86 mod objName fun allocs checkSat setup proofScript
             dropTask
             setServerVal lemmaName res

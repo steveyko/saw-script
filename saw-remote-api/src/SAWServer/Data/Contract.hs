@@ -8,6 +8,7 @@ module SAWServer.Data.Contract
   , Contract(..)
   , ContractVar(..)
   , Allocated(..)
+  , GhostPointsTo(..)
   , PointsTo(..)
   ) where
 
@@ -27,11 +28,13 @@ data Contract ty cryptolExpr =
     { preVars       :: [ContractVar ty]
     , preConds      :: [cryptolExpr]
     , preAllocated  :: [Allocated ty]
+    , preGhostPointsTos  :: [GhostPointsTo cryptolExpr]
     , prePointsTos  :: [PointsTo cryptolExpr]
     , argumentVals  :: [CrucibleSetupVal cryptolExpr]
     , postVars      :: [ContractVar ty]
     , postConds     :: [cryptolExpr]
     , postAllocated :: [Allocated ty]
+    , postGhostPointsTos :: [GhostPointsTo cryptolExpr]
     , postPointsTos :: [PointsTo cryptolExpr]
     , returnVal     :: Maybe (CrucibleSetupVal cryptolExpr)
     }
@@ -58,11 +61,23 @@ data PointsTo cryptolExpr =
     , pointsTo :: CrucibleSetupVal cryptolExpr
     } deriving stock (Functor, Foldable, Traversable)
 
+data GhostPointsTo cryptolExpr =
+  GhostPointsTo
+    { ghostVarName :: ServerName
+    , ghostValue   :: cryptolExpr
+    } deriving stock (Functor, Foldable, Traversable)
+
 instance FromJSON cryptolExpr => FromJSON (PointsTo cryptolExpr) where
   parseJSON =
     withObject "Points-to relationship" $ \o ->
       PointsTo <$> o .: "pointer"
                <*> o .: "points to"
+
+instance FromJSON cryptolExpr => FromJSON (GhostPointsTo cryptolExpr) where
+  parseJSON =
+    withObject "ghost variable value" $ \o ->
+      GhostPointsTo <$> o .: "server name"
+                    <*> o .: "value"
 
 instance FromJSON ty => FromJSON (Allocated ty) where
   parseJSON =
@@ -85,10 +100,12 @@ instance (FromJSON ty, FromJSON e) => FromJSON (Contract ty e) where
     Contract <$> o .: "pre vars"
              <*> o .: "pre conds"
              <*> o .: "pre allocated"
+             <*> o .: "pre ghost points tos"
              <*> o .: "pre points tos"
              <*> o .: "argument vals"
              <*> o .: "post vars"
              <*> o .: "post conds"
              <*> o .: "post allocated"
+             <*> o .: "post ghost points tos"
              <*> o .: "post points tos"
              <*> o .: "return val"

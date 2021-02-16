@@ -45,7 +45,7 @@ import Verifier.SAW.Term.Functor (mkModuleName)
 import Verifier.SAW.TypedTerm (TypedTerm, CryptolModule)
 
 
-import qualified SAWScript.Crucible.Common.MethodSpec as CMS (CrucibleMethodSpecIR)
+import qualified SAWScript.Crucible.Common.MethodSpec as CMS (CrucibleMethodSpecIR, GhostGlobal)
 import qualified SAWScript.Crucible.LLVM.MethodSpecIR as CMS (SomeLLVM, LLVMModule)
 import SAWScript.JavaExpr (JavaType(..))
 import SAWScript.Options (defaultOptions)
@@ -67,13 +67,13 @@ type CryptolAST = P.Expr P.PName
 
 data SAWTask
   = ProofScriptTask
-  | LLVMCrucibleSetup ServerName [SetupStep LLVM.Type]
-  | JVMSetup ServerName [SetupStep JavaType]
+  | LLVMCrucibleSetup ServerName
+  | JVMSetup ServerName
 
 instance Show SAWTask where
   show ProofScriptTask = "ProofScript"
-  show (LLVMCrucibleSetup n steps) = "(LLVMCrucibleSetup" ++ show n ++ " " ++ show steps ++ ")"
-  show (JVMSetup n steps) = "(JVMSetup" ++ show n ++ " " ++ show steps ++ ")"
+  show (LLVMCrucibleSetup n) = "(LLVMCrucibleSetup" ++ show n ++ ")"
+  show (JVMSetup n) = "(JVMSetup" ++ show n ++ ")"
 
 
 data CrucibleSetupVal e
@@ -94,6 +94,7 @@ data SetupStep ty
   = SetupReturn (CrucibleSetupVal CryptolAST) -- ^ The return value
   | SetupFresh ServerName Text ty -- ^ Server name to save in, debug name, fresh variable type
   | SetupAlloc ServerName ty Bool (Maybe Int) -- ^ Server name to save in, type of allocation, mutability, alignment
+  | SetupGhostPointsTo ServerName CryptolAST -- ^ Variable, term
   | SetupPointsTo (CrucibleSetupVal CryptolAST) (CrucibleSetupVal CryptolAST) -- ^ Source, target
   | SetupExecuteFunction [CrucibleSetupVal CryptolAST] -- ^ Function's arguments
   | SetupPrecond CryptolAST -- ^ Function's precondition
@@ -267,6 +268,7 @@ data ServerVal
   | VLLVMModule (Some CMS.LLVMModule)
   | VJVMMethodSpecIR (CMS.CrucibleMethodSpecIR CJ.JVM)
   | VLLVMMethodSpecIR (CMS.SomeLLVM CMS.CrucibleMethodSpecIR)
+  | VGhostVar CMS.GhostGlobal
 
 instance Show ServerVal where
   show (VTerm t) = "(VTerm " ++ show t ++ ")"
@@ -279,6 +281,7 @@ instance Show ServerVal where
   show (VLLVMModule (Some _)) = "VLLVMModule"
   show (VLLVMMethodSpecIR _) = "VLLVMMethodSpecIR"
   show (VJVMMethodSpecIR _) = "VJVMMethodSpecIR"
+  show (VGhostVar x) = "(VGhostVar " ++ show x ++ ")"
 
 class IsServerVal a where
   toServerVal :: a -> ServerVal
@@ -303,6 +306,9 @@ instance IsServerVal (CMS.SomeLLVM CMS.CrucibleMethodSpecIR) where
 
 instance IsServerVal JSS.Class where
   toServerVal = VJVMClass
+
+instance IsServerVal CMS.GhostGlobal where
+  toServerVal = VGhostVar
 
 class KnownCrucibleSetupType a where
   knownCrucibleSetupRepr :: CrucibleSetupTypeRepr a
@@ -393,3 +399,16 @@ getTerm n =
      case v of
        VTerm t -> return t
        _other -> raise (notATerm n)
+
+getGhost :: ServerName -> Method SAWState CMS.GhostGlobal
+getGhost n =
+  do v <- getServerVal n
+     case v of
+       VGhostVar x -> return x
+       _other -> error "TODO" -- raise (notAGhostVariable n) -- TODO
+
+getGhosts :: Method SAWState [(ServerName, CMS.GhostGlobal)]
+getGhosts =
+  do SAWEnv serverEnv <- view sawEnv <$> getState
+     return [ (n, g) | (n, VGhostVar g) <- M.toList serverEnv ]
+

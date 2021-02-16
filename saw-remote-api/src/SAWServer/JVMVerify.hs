@@ -29,7 +29,7 @@ jvmVerifyAssume mode (VerifyParams className fun lemmaNames checkSat contract sc
      case tasks of
        (_:_) -> raise $ notAtTopLevel $ map fst tasks
        [] ->
-         do pushTask (JVMSetup lemmaName [])
+         do pushTask (JVMSetup lemmaName)
             state <- getState
             cls <- getJVMClass className
             let bic = view sawBIC state
