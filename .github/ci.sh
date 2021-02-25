@@ -165,7 +165,6 @@ install_system_deps() {
 
 test_dist() {
   VERBOSE=y cabal v2-test integration_tests
-  sh -c "! grep '<failure>' results.xml"
 }
 
 build_cryptol() {
