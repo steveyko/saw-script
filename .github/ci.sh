@@ -164,9 +164,7 @@ install_system_deps() {
 }
 
 test_dist() {
-  pushd intTests
-  env
-  LOUD=true ./runtests.sh
+  VERBOSE=y cabal v2-test integration_tests
   sh -c "! grep '<failure>' results.xml"
 }
 

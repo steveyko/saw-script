@@ -22,25 +22,24 @@ module Main where
 
 import Control.Monad ( filterM, foldM, join, unless )
 import Control.Monad.IO.Class (liftIO)
-import Data.List ( isInfixOf, isPrefixOf, intercalate, sort )
+import Data.List ( isPrefixOf, intercalate, sort )
 import Data.Maybe ( fromMaybe )
-import System.Directory ( getCurrentDirectory, getPermissions, executable
-                        , findExecutable
-                        , findExecutablesInDirectories
-                        , listDirectory, doesDirectoryExist, doesFileExist )
+import System.Directory ( getCurrentDirectory, findExecutable, listDirectory
+                        , doesDirectoryExist, doesFileExist )
 import System.Environment ( lookupEnv )
 import System.Exit ( ExitCode(ExitSuccess), exitFailure )
 import System.FilePath ( (</>), pathSeparator, searchPathSeparator
                        , takeDirectory, takeFileName, isAbsolute )
 import System.FilePath.Find ( always, find, extension, (==?) )
 import System.IO ( hPutStrLn, stderr )
-import System.Process ( readProcess
-                      , readProcessWithExitCode
+import System.Process ( readProcessWithExitCode
                       , readCreateProcessWithExitCode
                       , shell, CreateProcess(..) )
+-- import qualified Paths_saw_script as P
 import Test.Tasty
-import Test.Tasty.HUnit
-import Test.Tasty.ExpectedFailure
+    ( defaultMain, localOption, testGroup, mkTimeout, TestTree )
+import Test.Tasty.HUnit ( testCase, (@=?), assertBool )
+import Test.Tasty.ExpectedFailure ( ignoreTest )
 
 
 -- | Reads from DISABLED_TESTS env var or disabled_tests.txt file
@@ -84,14 +83,10 @@ data EnvVarSpec = EV String String
                   -- ^ single string value
                 | EVp String Char [String]
                   -- ^ accumulative path with separator
-                | EVd String String String
-                  -- ^ default initial value, prefix for replacement,
-                  -- then accumulative words
 
 updEnvVars :: String -> String -> [EnvVarSpec] -> [EnvVarSpec]
-updEnvVars n v [] = [ EV n v ]
+updEnvVars n v [] = [EV n v | v /= ""]
 updEnvVars n v (EV  n'   v' : evs) | n == n' = EV  n (if v == "" then v' else v) : evs
-updEnvVars n v (EVd n' p v' : evs) | n == n' = EVp n ' ' (if v == "" then [p, v'] else [p, v]) : evs
 updEnvVars n v (EVp n' s v' : evs) | n == n' = EVp n s (v' <> [v]) : evs
 updEnvVars n v (ev : evs) = ev : updEnvVars n v evs
 
@@ -99,7 +94,6 @@ envVarAssocList :: [EnvVarSpec] -> [(String, String)]
 envVarAssocList = map envVarAssoc
   where
     envVarAssoc (EV  n v)    = (n, v)
-    envVarAssoc (EVd n p v)  = (n, p <> " " <> v)
     envVarAssoc (EVp n s vs) = (n, intercalate [s] vs)
 
 -- ----------------------------------------------------------------------
@@ -109,26 +103,24 @@ envVarAssocList = map envVarAssoc
 --  tests, using the internal defaults plus overrides from the current
 --  environment:
 --     - SAW = saw invocation command (with jars specification)
---     - JSS = jss invocation command (with jars specification and -c)
 --     - JAVA = path to java runtime
 --     - HOME = directory to act as home when running tests
 --     - PATH = PATH searchlist, supplemented with discovered elements
 --     - JAVA_HOME = path to java installation
 --     - TESTBASE = path to intTests directory
+--     - SAW_JDK_JAR = path to rt.jar
 --
 --  These environment variables may already be set to supply default
---  locations for these components.  If not specified, the jss
---  executable should either already exist on the path or it should be
---  at the top level of the jvm-verifier submodule directory.
+--  locations for these components.
 --
 --  Also determine the list of JAR files to pass to the various tests:
 --     - The rt.jar runtime library from the JAVA installation
 --     - Any jars supplied with the jvm-verifier
 --     - Any jars supplied by saw
 --
--- Note that even if JSS and SAW are specified in the environment,
--- this test runner will augment those definitions with the discovered
--- jar files and target path specifications.
+-- Note that even if SAW is specified in the environment, this test runner will
+-- augment those definitions with the discovered jar files and target path
+-- specifications.
 
 
 -- | Returns the environment variable assocList to use for running
@@ -140,7 +132,7 @@ testParams intTestBase verbose = do
                     else here </> intTestBase
 
   -- try to determine where the saw binary is in case there are other
-  -- executables there (e.g. jss, z3, etc.)
+  -- executables there (e.g. z3, etc.)
   sawExe <- let v1loc = here </> "dist" </> "build" </> "saw" </> "saw"
             in doesFileExist v1loc >>= \case
                  True -> return v1loc
@@ -151,14 +143,9 @@ testParams intTestBase verbose = do
                      Nothing -> findExecutable "saw" >>= \case
                        Just e -> return e
                        _ -> return "" -- may be supplied via env var
-
   verbose $ "Locally-built saw exe at: " <> sawExe
-  let sawRoot = takeDirectory absTestBase
-      jverPath = sawRoot </> "deps" </> "jvm-verifier"  -- jss *might* be here
-      eVars0 = [ EV  "JAVAC"    "javac"
-               , EV  "RT_JAR"   ""
-               , EV  "HOME"     absTestBase
-               , EVp "PATH"     searchPathSeparator [takeDirectory sawExe, jverPath ]
+  let eVars0 = [ EV  "HOME"     absTestBase
+               , EVp "PATH"     searchPathSeparator [takeDirectory sawExe]
                , EV  "TESTBASE" absTestBase
                , EV  "DIRSEP"   [pathSeparator]
                , EV  "CPSEP"    [searchPathSeparator]
@@ -166,79 +153,26 @@ testParams intTestBase verbose = do
                -- The eval is used to protect the evaluation of the
                -- single-quoted arguments supplied below when run in a
                -- bash test.sh script.
-               , EVd "JSS"      "eval" "jss"
-               , EVd "SAW"      "eval" "saw"
+               , EVp "SAW"      ' ' ["eval", "saw"]
                ]
       addEnvVar evs e = do v <- lookupEnv e
                            return $ updEnvVars e (fromMaybe "" v) evs
   -- override eVars0 with any environment variables set in this process
-  e1 <- foldM addEnvVar eVars0 [ "SAW", "JSS", "PATH", "JAVAC", "JAVA_HOME", "RT_JAR" ]
+  e1 <- foldM addEnvVar eVars0 [ "SAW", "PATH", "JAVAC", "JAVA_HOME", "SAW_JDK_JAR" ]
 
-  -- The java compiler to run defaults to "javac" but can be
-  -- overridden by the JAVAC environment variable.  Assume that javac
-  -- is in the current path or that the JAVAC provides the path.
+  -- Create a pathlist of jars for invoking saw
+  let jarsDir = absTestBase </> "jars"
 
-  -- The RT_JAR environment variable can be used to provide the path
-  -- to the rt.jar file.  If it is not provided, check in JAVA_HOME or
-  -- use the jvm-verifier's utility to try to locate it.
-
-  -- if JAVA_HOME was set, its bin subdir should be added to PATH and
-  -- it can be assumed to reference rt.jar.  Otherwise, use the
-  -- jvm-verifier's "find-java-rt-jar.sh" script to find the latter.
-  jars0 <- let j1 = fromMaybe "" $ lookup "RT_JAR" (envVarAssocList e1)
-               j2 = maybe "" (\jh -> jh </> "jre" </> "lib" </> "rt.jar") $ lookup "JAVA_HOME" (envVarAssocList e1)
-               j3 = do verbose $ "Running find-java-rt-jar.sh to get java jar path"
-                       rt <- readProcess "find-java-rt-jar.sh" [] ""  -- from jvm-verifier
-                       return $ case filter (`isInfixOf` "rt.jar") $ lines rt of
-                         [] -> "rt.jar"  -- unlikely to work, but could not be found elsewhere
-                         (j:_) -> j
-               doesJarExist p getJ = case p of
-                 Just _ -> return p
-                 Nothing -> do j <- getJ
-                               doesFileExist j >>= \case
-                                 True -> return $ Just j
-                                 False -> return Nothing
-           in fromMaybe "rt.jar" <$> foldM doesJarExist Nothing [ return j1, return j2, j3 ]
-
-  -- Create a pathlist of jars for invoking saw and jss
-  let sawJarPath = absTestBase </> "jars"
-
-  -- Find the jss executable because it's likely the jar files live
-  -- next to the executable.  Note that 'findExecutable' is odd in
-  -- that it doesn't support relative filepaths like "bin/jss", thus
-  -- the direct check first.
-  let Just (jssexe:_) = reverse . words <$> lookup "JSS" (envVarAssocList e1)
-  verbose $ "Finding JSS executable " <> jssexe <> " directly or in PATH"
-  jssPath <- doesFileExist jssexe >>= \case
-    True -> executable <$> getPermissions jssexe >>= \case
-      True -> return jssexe
-      False -> error $ "JSS executable specified as \"" <> jssexe <> "\" exists but is not executable"
-    False -> findExecutable jssexe >>= \case
-      Just p -> return p
-      Nothing -> findExecutablesInDirectories [jverPath] "jss" >>= \case
-        [] -> error $ "Unable to find jss executable in " <> jverPath <> " or PATH "  <> (show $ lookup "PATH" (envVarAssocList e1))
-        es -> return $ head es
-
-  let jssJarPath1 = jverPath </> "jars"
-      jssJarPath2 = (takeDirectory $ takeDirectory jssPath) </> "share" </> "java"
-      jarpaths = [ jssJarPath1, jssJarPath2, sawJarPath ]
-
-      findJarsIn p = doesDirectoryExist p >>= \case
+  let findJarsIn p = doesDirectoryExist p >>= \case
         True -> find always (extension ==? ".jar") p
         False -> return []
 
-  verbose $ "Finding JARs in " <> show jarpaths
-  jars <- intercalate [searchPathSeparator] . (jars0 :) . join <$>
-          mapM findJarsIn jarpaths
+  verbose $ "Finding JARs in " <> jarsDir
+  jars <- intercalate [searchPathSeparator] <$> findJarsIn jarsDir
 
-  -- Set the SAW and JSS env var for the testing scripts to invoke the
-  -- corresponding tools with the JAR list, again allowing ENV
-  -- override.
-  --
-  let e3 = updEnvVars "SAW" (unwords [ "-j", "'" <> jars <> "'" ]) $
-           updEnvVars "JSS" (unwords [ "-j", "'" <> jars <> "'", "-c", "." ]) $
-           updEnvVars "PATH" (takeDirectory jssPath) $
-           e1
+  -- Set the SAW env var for the testing scripts to invoke saw with the JAR
+  -- list, again allowing ENV override.
+  let e3 = updEnvVars "SAW" (unwords [ "-j", "'" <> jars <> "'" ]) e1
 
   return $ envVarAssocList e3
 
