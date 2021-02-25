@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {- |
 Module      : Main
 Description :
@@ -10,7 +11,6 @@ module Main where
 import Control.Exception
 import Control.Monad
 import Data.Maybe
-import Data.List
 
 import System.IO
 import System.Console.GetOpt
@@ -23,7 +23,11 @@ import SAWScript.Interpreter (processFile)
 import qualified SAWScript.REPL as REPL
 import SAWScript.Version (shortVersionText)
 import SAWScript.Value (AIGProxy(..))
+#ifdef USE_BUILTIN_ABC
 import qualified Data.ABC.GIA as GIA
+#else
+import qualified Data.AIG as AIG
+#endif
 
 main :: IO ()
 main = do
@@ -31,7 +35,7 @@ main = do
   argv <- getArgs
   case getOpt Permute options argv of
     (opts, files, []) -> do
-      let opts' = foldl' (flip id) defaultOptions opts
+      opts' <- foldl (>>=) (return defaultOptions) opts
       opts'' <- processEnv opts'
       {- We have two modes of operation: batch processing, handled in
       'SAWScript.ProcessFile', and a REPL, defined in 'SAWScript.REPL'. -}
@@ -41,7 +45,11 @@ main = do
         [] -> checkZ3 opts'' *> REPL.run opts''
         _ | runInteractively opts'' -> checkZ3 opts'' *> REPL.run opts''
         [file] -> checkZ3 opts'' *>
+#if USE_BUILTIN_ABC
           processFile (AIGProxy GIA.proxy) opts'' file `catch`
+#else
+          processFile (AIGProxy AIG.basicProxy) opts'' file `catch`
+#endif
           (\(ErrorCall msg) -> err opts'' msg)
         (_:_) -> err opts'' "Multiple files not yet supported."
     (_, _, errs) -> do hPutStrLn stderr (concat errs ++ usageInfo header options)

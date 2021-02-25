@@ -28,7 +28,7 @@ Stability   : provisional
 module SAWScript.Crucible.JVM.MethodSpecIR where
 
 import           Control.Lens
-import qualified Text.PrettyPrint.ANSI.Leijen as PPL hiding ((<$>), (<>))
+import qualified Prettyprinter as PPL
 
 -- what4
 import           What4.ProgramLoc (ProgramLoc)
@@ -37,13 +37,13 @@ import qualified Lang.Crucible.FunctionHandle as Crucible (HandleAllocator)
 
 -- crucible-jvm
 import qualified Lang.Crucible.JVM as CJ
-
--- jvm-verifier
--- TODO: transition to Lang.JVM.Codebase from crucible-jvm
-import qualified Verifier.Java.Codebase as CB
+import qualified Lang.JVM.Codebase as CB
 
 -- jvm-parser
 import qualified Language.JVM.Parser as J
+
+-- cryptol-saw-core
+import           Verifier.SAW.TypedTerm (TypedTerm)
 
 import           SAWScript.Crucible.Common (Sym)
 import qualified SAWScript.Crucible.Common.MethodSpec as MS
@@ -53,7 +53,7 @@ import qualified SAWScript.Crucible.Common.Setup.Type as Setup
 -- ** Language features
 
 type instance MS.HasSetupNull CJ.JVM = 'True
-type instance MS.HasSetupGlobal CJ.JVM = 'True
+type instance MS.HasSetupGlobal CJ.JVM = 'False
 type instance MS.HasSetupStruct CJ.JVM = 'False
 type instance MS.HasSetupArray CJ.JVM = 'False
 type instance MS.HasSetupElem CJ.JVM = 'False
@@ -73,19 +73,26 @@ type instance MS.ExtType CJ.JVM = J.Type
 
 data JVMMethodId =
   JVMMethodId
-    { _jvmMethodName :: String
+    { _jvmMethodKey :: J.MethodKey
     , _jvmClassName  :: J.ClassName
     }
   deriving (Eq, Ord, Show)
 
 makeLenses ''JVMMethodId
 
-csMethodName :: Lens' (MS.CrucibleMethodSpecIR CJ.JVM) String
+jvmMethodName :: Getter JVMMethodId String
+jvmMethodName = jvmMethodKey . to J.methodKeyName
+
+csMethodKey :: Lens' (MS.CrucibleMethodSpecIR CJ.JVM) J.MethodKey
+csMethodKey = MS.csMethod . jvmMethodKey
+
+csMethodName :: Getter (MS.CrucibleMethodSpecIR CJ.JVM) String
 csMethodName = MS.csMethod . jvmMethodName
 
+-- TODO: avoid intermediate 'String' values
 instance PPL.Pretty JVMMethodId where
-  pretty (JVMMethodId methName className) =
-    PPL.text (concat [J.unClassName className ,".", methName])
+  pretty (JVMMethodId methKey className) =
+    PPL.pretty (concat [J.unClassName className ,".", J.methodKeyName methKey])
 
 type instance MS.MethodId CJ.JVM = JVMMethodId
 
@@ -113,20 +120,52 @@ type instance MS.AllocSpec CJ.JVM = (ProgramLoc, Allocation)
 type instance MS.PointsTo CJ.JVM = JVMPointsTo
 
 data JVMPointsTo
-  = JVMPointsToField ProgramLoc (MS.SetupValue CJ.JVM) String (MS.SetupValue CJ.JVM)
-  | JVMPointsToElem ProgramLoc (MS.SetupValue CJ.JVM) Int (MS.SetupValue CJ.JVM)
+  = JVMPointsToField ProgramLoc MS.AllocIndex J.FieldId (MS.SetupValue CJ.JVM)
+  | JVMPointsToStatic ProgramLoc J.FieldId (MS.SetupValue CJ.JVM)
+  | JVMPointsToElem ProgramLoc MS.AllocIndex Int (MS.SetupValue CJ.JVM)
+  | JVMPointsToArray ProgramLoc MS.AllocIndex TypedTerm
 
-ppPointsTo :: JVMPointsTo -> PPL.Doc
+overlapPointsTo :: JVMPointsTo -> JVMPointsTo -> Bool
+overlapPointsTo =
+  \case
+    JVMPointsToField _ p1 f1 _ ->
+      \case
+        JVMPointsToField _ p2 f2 _ -> p1 == p2 && f1 == f2
+        _                          -> False
+    JVMPointsToStatic _ f1 _ ->
+      \case
+        JVMPointsToStatic _ f2 _   -> f1 == f2
+        _                          -> False
+    JVMPointsToElem _ p1 i1 _ ->
+      \case
+        JVMPointsToElem _ p2 i2 _  -> p1 == p2 && i1 == i2
+        JVMPointsToArray _ p2 _    -> p1 == p2
+        _                          -> False
+    JVMPointsToArray _ p1 _ ->
+      \case
+        JVMPointsToElem _ p2 _ _   -> p1 == p2
+        JVMPointsToArray _ p2 _    -> p1 == p2
+        _                          -> False
+
+ppPointsTo :: JVMPointsTo -> PPL.Doc ann
 ppPointsTo =
   \case
-    JVMPointsToField _loc ptr fld val ->
-      MS.ppSetupValue ptr <> PPL.text "." <> PPL.text fld
-      PPL.<+> PPL.text "points to"
+    JVMPointsToField _loc ptr fid val ->
+      MS.ppAllocIndex ptr <> PPL.pretty "." <> PPL.pretty (J.fieldIdName fid)
+      PPL.<+> PPL.pretty "points to"
+      PPL.<+> MS.ppSetupValue val
+    JVMPointsToStatic _loc fid val ->
+      PPL.pretty (J.unClassName (J.fieldIdClass fid)) <> PPL.pretty "." <> PPL.pretty (J.fieldIdName fid)
+      PPL.<+> PPL.pretty "points to"
       PPL.<+> MS.ppSetupValue val
     JVMPointsToElem _loc ptr idx val ->
-      MS.ppSetupValue ptr <> PPL.text "[" <> PPL.text (show idx) <> PPL.text "]"
-      PPL.<+> PPL.text "points to"
+      MS.ppAllocIndex ptr <> PPL.pretty "[" <> PPL.pretty idx <> PPL.pretty "]"
+      PPL.<+> PPL.pretty "points to"
       PPL.<+> MS.ppSetupValue val
+    JVMPointsToArray _loc ptr val ->
+      MS.ppAllocIndex ptr
+      PPL.<+> PPL.pretty "points to"
+      PPL.<+> MS.ppTypedTerm val
 
 instance PPL.Pretty JVMPointsTo where
   pretty = ppPointsTo
@@ -158,7 +197,7 @@ initialDefCrucibleMethodSpecIR ::
   ProgramLoc ->
   MS.CrucibleMethodSpecIR CJ.JVM
 initialDefCrucibleMethodSpecIR cb cname method loc =
-  let methId = JVMMethodId (J.methodName method) cname
+  let methId = JVMMethodId (J.methodKey method) cname
       retTy = J.methodReturnType method
       argTys = thisType ++ J.methodParameterTypes method
   in MS.makeCrucibleMethodSpecIR methId argTys retTy loc cb
@@ -166,14 +205,14 @@ initialDefCrucibleMethodSpecIR cb cname method loc =
 
 initialCrucibleSetupState ::
   JVMCrucibleContext ->
-  J.Method ->
+  (J.Class, J.Method) ->
   ProgramLoc ->
   Setup.CrucibleSetupState CJ.JVM
-initialCrucibleSetupState cc method loc =
+initialCrucibleSetupState cc (cls, method) loc =
   Setup.makeCrucibleSetupState cc $
     initialDefCrucibleMethodSpecIR
       (cc ^. jccCodebase)
-      (J.className $ cc ^. jccJVMClass)
+      (J.className cls)
       method
       loc
 

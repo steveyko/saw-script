@@ -43,6 +43,7 @@ module SAWScript.Crucible.LLVM.MethodSpecIR
   , allocSpecMut
   , allocSpecLoc
   , allocSpecBytes
+  , allocSpecFresh
   , mutIso
   , isMut
     -- * LLVMModule
@@ -103,11 +104,10 @@ module SAWScript.Crucible.LLVM.MethodSpecIR
 import           Control.Lens
 import           Control.Monad (when)
 import           Data.Functor.Compose (Compose(..))
-import           Data.IORef
 import           Data.Type.Equality (TestEquality(..))
+import qualified Prettyprinter as PPL
 import qualified Text.LLVM.AST as L
 import qualified Text.LLVM.PP as L
-import qualified Text.PrettyPrint.ANSI.Leijen as PPL hiding ((<$>), (<>))
 import qualified Text.PrettyPrint.HughesPJ as PP
 
 import qualified Data.LLVM.BitCode as LLVM
@@ -118,26 +118,27 @@ import           Data.Parameterized.All (All(All))
 import           Data.Parameterized.Some (Some(Some))
 import qualified Data.Parameterized.Map as MapF
 
-import qualified What4.Expr.Builder as B
 import           What4.ProgramLoc (ProgramLoc)
 
-import qualified Lang.Crucible.Backend.SAWCore as Crucible
-  (SAWCoreBackend, saw_ctx, toSC, SAWCruciblePersonality)
 import qualified Lang.Crucible.FunctionHandle as Crucible (HandleAllocator)
 import qualified Lang.Crucible.Simulator.ExecutionTree as Crucible (SimContext)
 import qualified Lang.Crucible.Simulator.GlobalState as Crucible (SymGlobalState)
 import qualified Lang.Crucible.Types as Crucible (SymbolRepr, knownSymbol)
 import qualified Lang.Crucible.Simulator.Intrinsics as Crucible
   (IntrinsicClass(Intrinsic, muxIntrinsic), IntrinsicMuxFn(IntrinsicMuxFn))
-import           SAWScript.Crucible.Common (Sym)
+
+import           SAWScript.Crucible.Common
 import qualified SAWScript.Crucible.Common.MethodSpec as MS
 import qualified SAWScript.Crucible.Common.Setup.Type as Setup
 
 import qualified SAWScript.Crucible.LLVM.CrucibleLLVM as CL
 
+import           Verifier.SAW.Simulator.What4.ReturnTrip ( toSC, saw_ctx )
+
 import           Verifier.SAW.Rewriter (Simpset)
 import           Verifier.SAW.SharedTerm
 import           Verifier.SAW.TypedTerm
+
 
 --------------------------------------------------------------------------------
 -- ** Language features
@@ -173,7 +174,7 @@ csParentName :: Lens' (MS.CrucibleMethodSpecIR (CL.LLVM arch)) (Maybe String)
 csParentName = MS.csMethod . llvmMethodParent
 
 instance PPL.Pretty LLVMMethodId where
-  pretty = PPL.text . view llvmMethodName
+  pretty = PPL.pretty . view llvmMethodName
 
 type instance MS.MethodId (CL.LLVM _) = LLVMMethodId
 
@@ -187,6 +188,7 @@ data LLVMAllocSpec =
     , _allocSpecAlign :: CL.Alignment
     , _allocSpecBytes :: Term
     , _allocSpecLoc   :: ProgramLoc
+    , _allocSpecFresh :: Bool -- ^ Whether declared with @crucible_fresh_pointer@
     }
   deriving (Eq, Show)
 
@@ -248,7 +250,8 @@ loadLLVMModule file halloc =
      case parseResult of
        Left err -> return (Left err)
        Right llvm_mod ->
-         do Some mtrans <- CL.translateModule halloc llvm_mod
+         do let ?optLoopMerge = False
+            Some mtrans <- CL.translateModule halloc llvm_mod
             return (Right (Some (LLVMModule file llvm_mod mtrans)))
 
 instance TestEquality LLVMModule where
@@ -289,17 +292,17 @@ showLLVMModule (LLVMModule name m _) =
 --------------------------------------------------------------------------------
 -- ** Ghost state
 
-instance Crucible.IntrinsicClass (Crucible.SAWCoreBackend n solver (B.Flags B.FloatReal)) MS.GhostValue where
-  type Intrinsic (Crucible.SAWCoreBackend n solver (B.Flags B.FloatReal)) MS.GhostValue ctx = TypedTerm
+instance Crucible.IntrinsicClass Sym MS.GhostValue where
+  type Intrinsic Sym MS.GhostValue ctx = TypedTerm
   muxIntrinsic sym _ _namerep _ctx prd thn els =
     do when (ttSchema thn /= ttSchema els) $ fail $ unlines $
          [ "Attempted to mux ghost variables of different types:"
          , show (Cryptol.pp (ttSchema thn))
          , show (Cryptol.pp (ttSchema els))
          ]
-       st <- readIORef (B.sbStateManager sym)
-       let sc  = Crucible.saw_ctx st
-       prd' <- Crucible.toSC sym prd
+       st <- sawCoreState sym
+       let sc  = saw_ctx st
+       prd' <- toSC sym st prd
        typ  <- scTypeOf sc (ttTerm thn)
        res  <- scIte sc typ prd' (ttTerm thn) (ttTerm els)
        return thn { ttTerm = res }
@@ -313,7 +316,7 @@ data LLVMCrucibleContext arch =
   LLVMCrucibleContext
   { _ccLLVMModule      :: LLVMModule arch
   , _ccBackend         :: Sym
-  , _ccLLVMSimContext  :: Crucible.SimContext (Crucible.SAWCruciblePersonality Sym) Sym (CL.LLVM arch)
+  , _ccLLVMSimContext  :: Crucible.SimContext (SAWCruciblePersonality Sym) Sym (CL.LLVM arch)
   , _ccLLVMGlobals     :: Crucible.SymGlobalState Sym
   , _ccBasicSS         :: Simpset
   }
@@ -344,12 +347,12 @@ data LLVMPointsToValue arch
   = ConcreteSizeValue (MS.SetupValue (CL.LLVM arch))
   | SymbolicSizeValue TypedTerm TypedTerm
 
-ppPointsTo :: LLVMPointsTo arch -> PPL.Doc
+ppPointsTo :: LLVMPointsTo arch -> PPL.Doc ann
 ppPointsTo (LLVMPointsTo _loc cond ptr val) =
   MS.ppSetupValue ptr
-  PPL.<+> PPL.text "points to"
+  PPL.<+> PPL.pretty "points to"
   PPL.<+> PPL.pretty val
-  PPL.<+> maybe PPL.empty (\tt -> PPL.text "if" PPL.<+> MS.ppTypedTerm tt) cond
+  PPL.<+> maybe PPL.emptyDoc (\tt -> PPL.pretty "if" PPL.<+> MS.ppTypedTerm tt) cond
 
 instance PPL.Pretty (LLVMPointsTo arch) where
   pretty = ppPointsTo
@@ -358,7 +361,7 @@ instance PPL.Pretty (LLVMPointsToValue arch) where
   pretty = \case
     ConcreteSizeValue val -> MS.ppSetupValue val
     SymbolicSizeValue arr sz ->
-      MS.ppTypedTerm arr PPL.<+> PPL.text "[" PPL.<+> MS.ppTypedTerm sz PPL.<+> PPL.text "]"
+      MS.ppTypedTerm arr PPL.<+> PPL.pretty "[" PPL.<+> MS.ppTypedTerm sz PPL.<+> PPL.pretty "]"
 
 --------------------------------------------------------------------------------
 -- ** AllocGlobal
@@ -367,10 +370,10 @@ type instance MS.AllocGlobal (CL.LLVM arch) = LLVMAllocGlobal arch
 
 data LLVMAllocGlobal arch = LLVMAllocGlobal ProgramLoc L.Symbol
 
-ppAllocGlobal :: LLVMAllocGlobal arch -> PPL.Doc
+ppAllocGlobal :: LLVMAllocGlobal arch -> PPL.Doc ann
 ppAllocGlobal (LLVMAllocGlobal _loc (L.Symbol name)) =
-  PPL.text "allocate global"
-  PPL.<+> PPL.text name
+  PPL.pretty "allocate global"
+  PPL.<+> PPL.pretty name
 
 instance PPL.Pretty (LLVMAllocGlobal arch) where
   pretty = ppAllocGlobal
@@ -392,15 +395,15 @@ data SetupError
   = InvalidReturnType L.Type
   | InvalidArgTypes [L.Type]
 
-ppSetupError :: SetupError -> PPL.Doc
+ppSetupError :: SetupError -> PPL.Doc ann
 ppSetupError (InvalidReturnType t) =
-  PPL.text "Can't lift return type" PPL.<+>
-  PPL.text (show (L.ppType t)) PPL.<+>
-  PPL.text "to a Crucible type."
+  PPL.pretty "Can't lift return type" PPL.<+>
+  PPL.viaShow (L.ppType t) PPL.<+>
+  PPL.pretty "to a Crucible type."
 ppSetupError (InvalidArgTypes ts) =
-  PPL.text "Can't lift argument types " PPL.<+>
-  PPL.encloseSep PPL.lparen PPL.rparen PPL.comma (map (PPL.text . show . L.ppType) ts) PPL.<+>
-  PPL.text "to Crucible types."
+  PPL.pretty "Can't lift argument types " PPL.<+>
+  PPL.encloseSep PPL.lparen PPL.rparen PPL.comma (map (PPL.viaShow . L.ppType) ts) PPL.<+>
+  PPL.pretty "to Crucible types."
 
 resolveArgs ::
   (?lc :: CL.TypeContext) =>

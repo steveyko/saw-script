@@ -2,6 +2,7 @@
 {-# Language RankNTypes, TypeOperators #-}
 {-# Language PatternSynonyms #-}
 {-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE GADTs #-}
 module SAWScript.X86
   ( Options(..)
   , proof
@@ -35,7 +36,6 @@ import qualified Data.BitVector.Sized as BV
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
-import           Data.IORef
 import qualified Data.Map as Map
 import qualified Data.Text as Text
 import           Data.Text.Encoding(decodeUtf8)
@@ -44,15 +44,13 @@ import           Data.Maybe(mapMaybe)
 
 -- import Text.PrettyPrint.ANSI.Leijen(pretty)
 
-import Data.ElfEdit (Elf, parseElf, ElfGetResult(..))
+import qualified Data.ElfEdit as Elf
 
 import Data.Parameterized.Some(Some(..))
 import Data.Parameterized.Context(EmptyCtx,(::>),singleton)
-import Data.Parameterized.Nonce(globalNonceGenerator)
 
 -- What4
 import What4.Interface(asNat,asBV)
-import What4.Expr(FloatModeRepr(..))
 import qualified What4.Interface as W4
 import qualified What4.Config as W4
 import What4.FunctionName(functionNameFromText)
@@ -84,11 +82,6 @@ import SAWScript.Crucible.LLVM.CrucibleLLVM
 import Lang.Crucible.LLVM.Intrinsics(llvmIntrinsicTypes)
 import Lang.Crucible.LLVM.MemModel (mkMemVar)
 import qualified Lang.Crucible.LLVM.MemModel as Crucible
-
--- Crucible SAW
-import Lang.Crucible.Backend.SAWCore
-  (newSAWCoreBackend, toSC, sawBackendSharedContext
-  , sawRegisterSymFunInterp)
 
 -- Macaw
 import Data.Macaw.Architecture.Info(ArchitectureInfo)
@@ -130,6 +123,8 @@ import Verifier.SAW.SharedTerm(Term, mkSharedContext, SharedContext, scImplies)
 import Verifier.SAW.Term.Pretty(showTerm)
 import Verifier.SAW.Recognizer(asBool)
 
+import Verifier.SAW.Simulator.What4.ReturnTrip (sawRegisterSymFunInterp, toSC, saw_ctx)
+
 -- Cryptol Verifier
 import Verifier.SAW.CryptolEnv(CryptolEnv,initCryptolEnv,loadCryptolModule)
 import Verifier.SAW.Cryptol.Prelude(scLoadPreludeModule,scLoadCryptolModule)
@@ -137,7 +132,7 @@ import Verifier.SAW.Cryptol.Prelude(scLoadPreludeModule,scLoadCryptolModule)
 -- SAWScript
 import SAWScript.X86Spec hiding (Prop)
 import SAWScript.Proof(predicateToProp, Quantification(Universal), Prop)
-
+import SAWScript.Crucible.Common (newSAWCoreBackend, sawCoreState)
 
 
 --------------------------------------------------------------------------------
@@ -202,7 +197,7 @@ proof fileReader archi file mbCry globs fun =
      halloc  <- newHandleAllocator
      scLoadPreludeModule sc
      scLoadCryptolModule sc
-     sym <- newSAWCoreBackend FloatRealRepr sc globalNonceGenerator
+     sym <- newSAWCoreBackend sc
      let ?fileReader = fileReader
      cenv <- loadCry sym mbCry
      mvar <- mkMemVar halloc
@@ -230,11 +225,12 @@ proofWithOptions opts =
 registerSymFuns :: Opts -> IO (SymFuns Sym)
 registerSymFuns opts =
   do let sym = optsSym opts
+     st  <- sawCoreState sym
      sfs <- newSymFuns sym
 
-     sawRegisterSymFunInterp sym (fnAesEnc     sfs) (mk2 "aesenc")
-     sawRegisterSymFunInterp sym (fnAesEncLast sfs) (mk2 "aesenclast")
-     sawRegisterSymFunInterp sym (fnClMul      sfs) (mk2 "clmul")
+     sawRegisterSymFunInterp st (fnAesEnc     sfs) (mk2 "aesenc")
+     sawRegisterSymFunInterp st (fnAesEncLast sfs) (mk2 "aesenclast")
+     sawRegisterSymFunInterp st (fnClMul      sfs) (mk2 "clmul")
 
      return sfs
 
@@ -260,19 +256,19 @@ data RelevantElf = RelevantElf
   }
 
 -- | Parse an elf file.
-getElf :: FilePath -> IO (Elf 64)
+getElf :: FilePath -> IO (Elf.ElfHeaderInfo 64)
 getElf path =
   do bs <- BS.readFile path
-     case parseElf bs of
-       Elf64Res [] e     -> return e
-       Elf64Res _ _      -> malformed "64-bit ELF input"
-       Elf32Res _ _      -> unsupported "32-bit ELF format"
-       ElfHeaderError {} -> malformed "Invalid ELF header"
+     case Elf.decodeElfHeaderInfo bs of
+       Right (Elf.SomeElf hdr)
+         | Elf.ELFCLASS64 <- Elf.headerClass (Elf.header hdr) -> pure hdr
+         | otherwise -> unsupported "32-bit ELF format"
+       Left _ -> malformed "Invalid ELF header"
 
 
 
 -- | Extract a Macaw "memory" from an ELF file and resolve symbols.
-getRelevant :: Elf 64 -> IO RelevantElf
+getRelevant :: Elf.ElfHeaderInfo 64 -> IO RelevantElf
 getRelevant elf =
   case (memoryForElf opts elf, memoryForElfAllSymbols opts elf) of
     (Left err, _) -> malformed err
@@ -342,6 +338,7 @@ loadGlobal elf (nm,n,u) =
                    is <- mapM readOne (addrsFor start)
                    return (sname, a, u, is)
 
+  err :: [Char] -> IO a
   err xs = fail $ unlines
                     [ "Failed to load global."
                     , "*** Global: " ++ show nm
@@ -360,11 +357,11 @@ loadCry ::
   Sym -> Maybe FilePath ->
   IO CryptolEnv
 loadCry sym mb =
-  do ctx <- sawBackendSharedContext sym
-     env <- initCryptolEnv ctx
+  do sc <- saw_ctx <$> sawCoreState sym
+     env <- initCryptolEnv sc
      case mb of
        Nothing   -> return env
-       Just file -> snd <$> loadCryptolModule ctx env file
+       Just file -> snd <$> loadCryptolModule sc env file
 
 
 --------------------------------------------------------------------------------
@@ -397,8 +394,7 @@ translate opts elf fun =
   do let name = funName fun
      sayLn ("Translating function: " ++ BSC.unpack name)
 
-     bbMapRef <- newIORef mempty
-     let ?badBehaviorMap = bbMapRef
+     let ?recordLLVMAnnotation = \_ _ -> return ()
 
      let sym   = backend opts
          sopts = Opts { optsSym = sym, optsCry = cryEnv opts, optsMvar = memvar opts }
@@ -418,8 +414,8 @@ translate opts elf fun =
      addr <- doSim opts elf sfs name globs st checkPost
 
      gs <- getGoals sym
-     ctx <- sawBackendSharedContext sym
-     return (ctx, addr, gs)
+     sc <- saw_ctx <$> sawCoreState sym
+     return (sc, addr, gs)
 
 
 setSimulatorVerbosity :: (W4.IsSymExprBuilder sym) => Int -> sym -> IO ()
@@ -567,11 +563,12 @@ gGoal sc g0 = predicateToProp sc Universal [] =<< go (gAssumes g)
 getGoals :: Sym -> IO [Goal]
 getGoals sym =
   do obls <- proofGoalsToList <$> getProofObligations sym
-     mapM toGoal obls
+     st <- sawCoreState sym
+     mapM (toGoal st) obls
   where
-  toGoal (ProofGoal asmps g) =
-    do as <- mapM (toSC sym) (toListOf (folded . labeledPred) asmps)
-       p  <- toSC sym (g ^. labeledPred)
+  toGoal st (ProofGoal asmps g) =
+    do as <- mapM (toSC sym st) (toListOf (folded . labeledPred) asmps)
+       p  <- toSC sym st (g ^. labeledPred)
        let SimError loc msg = g^.labeledPredMsg
        return Goal { gAssumes = as
                    , gShows   = p

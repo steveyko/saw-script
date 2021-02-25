@@ -1,12 +1,14 @@
 module SAWScript.Prover.RME where
 
 import qualified Data.Map as Map
+import qualified Data.Text as Text
+
+import qualified Data.RME as RME
 
 import Verifier.SAW.SharedTerm
 import Verifier.SAW.FiniteValue
 
 import qualified Verifier.SAW.Simulator.RME as RME
-import qualified Verifier.SAW.Simulator.RME.Base as RME
 import Verifier.SAW.Recognizer(asPiList)
 
 import SAWScript.Proof(Prop, propToPredicate)
@@ -24,7 +26,7 @@ proveRME sc goal =
      t <- bindAllExts sc t0 >>= rewriteEqs sc
      tp <- scWhnf sc =<< scTypeOf sc t
      let (args, _) = asPiList tp
-         argNames = map fst args
+         argNames = map (Text.unpack . fst) args
      RME.withBitBlastedPred sc Map.empty t $ \lit0 shapes ->
        let lit = RME.compl lit0
            stats = solverStats "RME" (scSharedSize t0)

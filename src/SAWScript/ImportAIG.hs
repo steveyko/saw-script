@@ -6,6 +6,7 @@ Maintainer  : huffman
 Stability   : provisional
 -}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
@@ -25,8 +26,9 @@ import Control.Exception
 import Control.Monad
 import Control.Monad.State.Strict
 import Control.Monad.Trans.Except
+import Data.Text (Text)
 import qualified Data.Vector as V
-import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import Prettyprinter
 
 import qualified Data.AIG as AIG
 
@@ -59,8 +61,10 @@ bitblastSharedTerm sc v (asBitvectorType -> Just w) = do
       scApplyPrelude_at sc wt boolType v =<< scNat sc (fromIntegral i)
   modify (V.++ inputs)
 bitblastSharedTerm _ _ tp = throwTP $ show $
-  text "Could not parse AIG input type:" <$$>
-  indent 2 (ppTerm defaultPPOpts tp)
+  vcat
+  [ "Could not parse AIG input type:"
+  , indent 2 (ppTerm defaultPPOpts tp)
+  ]
 
 parseAIGResultType :: SharedContext
                    -> Term -- ^ Term for type
@@ -147,7 +151,7 @@ translateNetwork :: AIG.IsAIG l g
                  -> SharedContext    -- ^ Context to build in term.
                  -> g x              -- ^ Network to bitblast
                  -> [l x]            -- ^ Outputs for network.
-                 -> [(String, Term)] -- ^ Expected types
+                 -> [(Text, Term)]   -- ^ Expected types
                  -> Term             -- ^ Expected output type.
                  -> ExceptT String IO Term
 translateNetwork opts sc ntk outputLits args resultType = do

@@ -68,15 +68,16 @@ import Language.JVM.Common (ppFldId)
 
 import Data.List (intercalate)
 import Data.List.Split
+import qualified Data.Text as Text
 import qualified Data.Vector as V
 import Text.Read hiding (lift)
 
-import Verifier.Java.Codebase as JSS
-import Verifier.Java.SAWBackend hiding (basic_ss)
+import Lang.JVM.Codebase as JSS
 
 import Verifier.SAW.Cryptol
 import Verifier.SAW.Recognizer
 import Verifier.SAW.SharedTerm
+import Verifier.SAW.TypedAST (toShortName)
 
 import qualified SAWScript.CongruenceClosure as CC
 import SAWScript.Position
@@ -164,7 +165,7 @@ jeVarName = map dotToUnderscore . ppJavaExpr
         dotToUnderscore c = c
 
 asJavaExpr :: Term -> Maybe String
-asJavaExpr (asExtCns -> Just ec) = Just (ecName ec)
+asJavaExpr (asExtCns -> Just ec) = Just (Text.unpack (toShortName (ecName ec))) -- TODO?
 asJavaExpr _ = Nothing
 
 isRefJavaExpr :: JavaExpr -> Bool

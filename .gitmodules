@@ -13,9 +13,6 @@
 [submodule "deps/jvm-parser"]
 	path = deps/jvm-parser
 	url = https://github.com/GaloisInc/jvm-parser.git
-[submodule "deps/jvm-verifier"]
-	path = deps/jvm-verifier
-	url = https://github.com/GaloisInc/jvm-verifier.git
 [submodule "deps/llvm-pretty"]
 	path = deps/llvm-pretty
 	url = https://github.com/elliottt/llvm-pretty.git
@@ -46,6 +43,6 @@
 [submodule "deps/what4"]
 	path = deps/what4
 	url = https://github.com/GaloisInc/what4.git
-[submodule "deps/saw-core-coq"]
-	path = deps/saw-core-coq
-	url = https://github.com/GaloisInc/saw-core-coq.git
+[submodule "deps/argo"]
+	path = deps/argo
+	url = https://github.com/galoisinc/argo

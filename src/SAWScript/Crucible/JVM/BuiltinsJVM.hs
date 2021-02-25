@@ -6,6 +6,8 @@ Stability   : provisional
 -}
 
 
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE NoMonoLocalBinds #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE EmptyCase #-}
 {-# LANGUAGE PackageImports #-}
@@ -22,7 +24,7 @@ module SAWScript.Crucible.JVM.BuiltinsJVM
        (
          loadJavaClass           -- java_load_class: reads a class from the codebase
        , prepareClassTopLevel
-       , crucible_java_extract   --
+       , jvm_extract   --
        ) where
 
 import           Data.List (isPrefixOf)
@@ -40,8 +42,6 @@ import           Control.Monad.State.Strict
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as Nonce
 
--- crucible/crucible-saw
-import qualified Lang.Crucible.Backend.SAWCore         as CrucibleSAW
 -- crucible/crucible
 import qualified Lang.Crucible.FunctionHandle          as Crucible
 import qualified Lang.Crucible.Simulator.Operations    as Crucible
@@ -64,22 +64,27 @@ import qualified What4.Interface as W4
 import qualified What4.Solver.Yices as Yices
 
 -- saw-core
-import Verifier.SAW.SharedTerm(Term, SharedContext, mkSharedContext, scImplies, scAbstractExts)
+import Verifier.SAW.SharedTerm(Term, SharedContext, mkSharedContext, scImplies)
 
 -- cryptol-saw-core
-import Verifier.SAW.TypedTerm(TypedTerm(..))
+import Verifier.SAW.TypedTerm (TypedTerm(..), abstractTypedExts)
+
+-- saw-core-what4
+import Verifier.SAW.Simulator.What4.ReturnTrip
 
 -- saw-script
 import SAWScript.Builtins(fixPos)
 import SAWScript.Value
 import SAWScript.Options(Options,simVerbose)
+import SAWScript.Crucible.Common
 import SAWScript.Crucible.LLVM.Builtins (setupArg, setupArgs, getGlobalPair, runCFG, baseCryptolType)
 
--- jvm-verifier
+-- jvm-parser
 import qualified Language.JVM.Common as J
 import qualified Language.JVM.Parser as J
+
 import qualified SAWScript.Utils as J
-import qualified "jvm-verifier" Verifier.Java.Codebase as JCB
+import qualified Lang.JVM.Codebase as JCB
 
 -- crucible-jvm
 import           Lang.Crucible.JVM (IsCodebase(..))
@@ -87,31 +92,27 @@ import qualified Lang.Crucible.JVM as CJ
 
 import Debug.Trace
 
---
--- | Use the Codebase implementation from the old Java static simulator
---
-instance IsCodebase JCB.Codebase where
-  lookupClass cb = J.lookupClass cb fixPos
-  findMethod  cb = J.findMethod  cb fixPos
-
 -----------------------------------------------------------------------
 -- | Make sure the class is in the database and allocate handles for its
 -- methods and static fields
 --
-loadJavaClass :: BuiltinContext -> String -> TopLevel J.Class
-loadJavaClass bic str = do
-  c <- io $ findClass (biJavaCodebase bic) str
-  prepareClassTopLevel bic str
+loadJavaClass :: String -> TopLevel J.Class
+loadJavaClass str = do
+  cb <- getJavaCodebase
+  c <- io $ findClass cb str
+  prepareClassTopLevel str
   return c
 
 -----------------------------------------------------------------------
 -- | Allocate the method handles/global static variables for the given
 -- class and add them to the current translation context
-prepareClassTopLevel :: BuiltinContext -> String -> TopLevel ()
-prepareClassTopLevel bic str = do
+prepareClassTopLevel :: String -> TopLevel ()
+prepareClassTopLevel str = do
+
+   cb <- getJavaCodebase
 
    -- get class from codebase
-   c <- io $ findClass (biJavaCodebase bic) str
+   c <- io $ findClass cb str
 
    -- get current ctx
    ctx0 <- getJVMTrans
@@ -124,7 +125,7 @@ prepareClassTopLevel bic str = do
      ctx <- io $ execStateT (CJ.extendJVMContext halloc c) ctx0
 
      -- update ctx
-     addJVMTrans ctx
+     putJVMTrans ctx
 
 
 -----------------------------------------------------------------------
@@ -132,10 +133,11 @@ prepareClassTopLevel bic str = do
 
 -- | Extract a JVM method to saw-core
 --
-crucible_java_extract :: BuiltinContext -> Options -> J.Class -> String -> TopLevel TypedTerm
-crucible_java_extract bic opts c mname = do
-  let sc        = biSharedContext bic
-  let cb        = biJavaCodebase bic
+jvm_extract :: J.Class -> String -> TopLevel TypedTerm
+jvm_extract c mname = do
+  sc <- getSharedContext
+  cb <- getJavaCodebase
+  opts <- getOptions
   let verbosity = simVerbose opts
   let gen       = Nonce.globalNonceGenerator
 
@@ -150,20 +152,21 @@ crucible_java_extract bic opts c mname = do
   -- allocate all of the handles/static vars that are directly referenced by
   -- this class
   let refs = CJ.initClasses ++ Set.toList (CJ.classRefs c)
-  mapM_ (prepareClassTopLevel bic . J.unClassName) refs
+  mapM_ (prepareClassTopLevel . J.unClassName) refs
 
   halloc <- getHandleAlloc
   ctx <- getJVMTrans
 
   io $ do -- only the IO monad, nothing else
-          sym <- CrucibleSAW.newSAWCoreBackend W4.FloatRealRepr sc gen
+          sym <- newSAWCoreBackend sc
+          st  <- sawCoreState sym
           CJ.setSimulatorVerbosity verbosity sym
 
           (CJ.JVMHandleInfo _m2 h) <- CJ.findMethodHandle ctx mcls meth
 
           (ecs, args) <- setupArgs sc sym h
 
-          res <- CJ.runMethodHandle sym CrucibleSAW.SAWCruciblePersonality halloc
+          res <- CJ.runMethodHandle sym SAWCruciblePersonality halloc
                      ctx verbosity className h args
 
           case res of
@@ -172,7 +175,7 @@ crucible_java_extract bic opts c mname = do
               let regval = gp^.Crucible.gpValue
               let regty = Crucible.regType regval
               let failure = fail $ unwords ["Unexpected return type:", show regty]
-              t <- Crucible.asSymExpr regval (CrucibleSAW.toSC sym) failure
+              t <- Crucible.asSymExpr regval (toSC sym st) failure
               cty <-
                 case Crucible.asBaseType regty of
                   Crucible.NotBaseType -> failure
@@ -180,9 +183,8 @@ crucible_java_extract bic opts c mname = do
                     case baseCryptolType bt of
                       Nothing -> failure
                       Just cty -> return cty
-              t' <- scAbstractExts sc (map snd (toList ecs)) t
-              let cty' = foldr Cryptol.tFun cty (map fst (toList ecs))
-              return $ TypedTerm (Cryptol.tMono cty') t'
+              let tt = TypedTerm (Cryptol.tMono cty) t
+              abstractTypedExts sc (toList ecs) tt
             Crucible.AbortedResult _ _ar -> do
               fail $ unlines [ "Symbolic execution failed." ]
             Crucible.TimeoutResult _cxt -> do

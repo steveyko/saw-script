@@ -56,10 +56,9 @@ import SAWScript.AutoMatch.LLVM
 import SAWScript.AutoMatch.Cryptol
 
 import SAWScript.LLVMBuiltins
---import SAWScript.JavaBuiltins
 import Language.JVM.Common (dotsToSlashes, mkClassName)
 
-import Text.PrettyPrint.ANSI.Leijen (putDoc, hPutDoc)
+import Prettyprinter.Render.Text (putDoc, hPutDoc)
 
 import System.IO
 
@@ -402,14 +401,14 @@ processResults (TaggedSourceFile leftLang  leftFile) (TaggedSourceFile rightLang
                   [SAWScript.StmtBind Unknown (SAWScript.PVar boundName Nothing) Nothing
                      (SAWScript.Application
                         (SAWScript.Application
-                           (SAWScript.Var . locate $ "crucible_llvm_extract")
+                           (SAWScript.Var . locate $ "llvm_extract")
                            (SAWScript.Var loadedModule))
                         (SAWScript.String function))]
                JVM ->
                   [SAWScript.StmtBind Unknown (SAWScript.PVar boundName Nothing) Nothing
                      (SAWScript.Application
                         (SAWScript.Application
-                           (SAWScript.Var . locate $ "crucible_java_extract")
+                           (SAWScript.Var . locate $ "jvm_extract")
                            (SAWScript.Var loadedModule))
                         (SAWScript.String function))]
 
